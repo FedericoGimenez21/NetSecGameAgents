@@ -65,7 +65,7 @@ class QAgent(BaseAgent):
         state_str = state_as_ordered_string(state)
         features = self.feature_extractor.extract_features(state_str)
         # Discretizar características para usar como clave en Q-table
-        return tuple(np.round(features, decimals=2))
+        return tuple(int(x) for x in features)
 
     def max_action_q(self, observation:Observation) -> Action:
         state = observation.state
