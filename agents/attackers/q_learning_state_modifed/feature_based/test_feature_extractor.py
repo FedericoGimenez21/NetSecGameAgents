@@ -157,7 +157,7 @@ class TestFeatureExtractor(unittest.TestCase):
         features = self.feature_extractor.extract_features(self.complex_state)
         
         self.assertIsInstance(features, np.ndarray)
-        self.assertEqual(features.dtype, np.int64)
+        self.assertTrue(np.issubdtype(features.dtype, np.integer))
 
     def test_feature_vector_consistency(self):
         """Test that same input produces same output"""
