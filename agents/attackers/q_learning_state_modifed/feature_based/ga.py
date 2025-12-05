@@ -6,6 +6,7 @@ from pymoo.operators.mutation.pm import PM
 from pymoo.operators.sampling.rnd import FloatRandomSampling
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
+from AIDojoCoordinator.game_components import Action, ActionType
 import pickle
 import matplotlib.pyplot as plt
 import subprocess
@@ -14,6 +15,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+import gc
 
 
 class QTableOptimizationProblem(Problem):
@@ -86,28 +88,39 @@ class QTableOptimizationProblem(Problem):
         print(f"Tamaño de Q-table: {self.n_states} × {self.n_actions} = {self.q_table_size} valores")
     
     def _load_actions(self):
-        """Carga las acciones desde registration_info.json"""
+        """Carga las acciones desde registration_info.json y las convierte a objetos Action"""
         try:
             json_raw = open("registration_info.json").read()
 
             outer = json.loads(json_raw)          # convierte primer nivel
-            actions = json.loads(outer["all_actions"])  # convierte el string interno
+            actions_dicts = json.loads(outer["all_actions"])  # convierte el string interno
 
 
-            print("Cantidad de acciones:", len(actions))
-            print("Ejemplo:", actions[0])
+            print("Cantidad de acciones:", len(actions_dicts))
+            print("Ejemplo:", actions_dicts[0])
 
-            if not actions:
+            if not actions_dicts:
                 print(f"ADVERTENCIA: No se encontraron acciones en {self.actions_file}")
                 sys.exit(0)
                 
-            print(f"Cargadas {len(actions)} acciones desde {self.actions_file}")
+            print(f"Cargadas {len(actions_dicts)} acciones desde {self.actions_file}")
 
-            # Validar formato de acciones
-            if actions and isinstance(actions[0], dict):
-                if 'action_type' in actions[0] and 'parameters' in actions[0]:
-                    print(f"Formato de acciones validado correctamente")
-                    print(f"Ejemplo de acción: {actions[0]['action_type']}")
+            # Convertir diccionarios a objetos Action
+            actions = []
+            for action_dict in actions_dicts:
+                if 'action_type' in action_dict and 'parameters' in action_dict:
+                    # Convertir action_type string a ActionType enum
+                    # Limpiar el prefijo 'ActionType.' si existe
+                    action_type_str = action_dict['action_type'].replace('ActionType.', '')
+                    action_type = ActionType[action_type_str]
+                    
+                    # Convertir parámetros a estructura hashable
+                    params = self._make_params_hashable(action_dict['parameters'])
+                    action = Action(action_type, parameters=params)
+                    actions.append(action)
+            
+            print(f"Convertidas {len(actions)} acciones a objetos Action")
+            print(f"Ejemplo de acción: {actions[0]}")
             
             return actions
         except FileNotFoundError:
@@ -116,6 +129,20 @@ class QTableOptimizationProblem(Problem):
         except json.JSONDecodeError as e:
             print(f"Error al parsear {self.actions_file}: {e}")
             sys.exit(0)
+    
+    def _make_params_hashable(self, params):
+        """Convierte parámetros con diccionarios anidados a estructura hashable"""
+        hashable_params = {}
+        for key, value in params.items():
+            if isinstance(value, dict):
+                # Convertir diccionarios a tuplas de items ordenados
+                hashable_params[key] = tuple(sorted(value.items()))
+            elif isinstance(value, list):
+                # Convertir listas a tuplas
+                hashable_params[key] = tuple(value)
+            else:
+                hashable_params[key] = value
+        return hashable_params
     
     def _load_states(self):
         """Carga los estados específicos desde el archivo JSON"""
@@ -149,16 +176,18 @@ class QTableOptimizationProblem(Problem):
         # Reshape parámetros a matriz Q-table
         q_table_matrix = params.reshape(self.n_states, self.n_actions)
         
-        # Crear diccionario Q-table con mapeo estado -> acción -> q-value
+        # Crear diccionario Q-table con mapeo estado -> Action object -> q-value
         q_table = {}
         for state_idx, state in enumerate(self.states):
             for action_idx in range(self.n_actions):
-                q_table[(state, action_idx)] = q_table_matrix[state_idx, action_idx]
+                # Usar el objeto Action en lugar del índice
+                action = self.actions[action_idx]
+                q_table[(state, action)] = q_table_matrix[state_idx, action_idx]
         
         # Crear estructura compatible con q_agent_feature_based.py
         # El agente solo usa 'q_table' y 'state_mapping'
         q_table_data = {
-            'q_table': q_table,           # Diccionario {(state_tuple, action_idx): q_value}
+            'q_table': q_table,           # Diccionario {(state_tuple, Action): q_value}
             'state_mapping': {}            # Vacío, el agente lo construye dinámicamente
         }
         
@@ -212,7 +241,7 @@ class QTableOptimizationProblem(Problem):
                         print(f"Temporal eliminado: {os.path.basename(q_table_path)}")
                     except Exception as e:
                         print(f"No se pudo eliminar {q_table_path}: {e}")
-        
+                gc.collect()
         # Limpieza adicional: asegurar que todos los archivos temporales fueron eliminados
         for temp_file in temp_files_created:
             if os.path.exists(temp_file):
