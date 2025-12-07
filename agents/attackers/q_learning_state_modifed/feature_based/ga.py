@@ -15,7 +15,6 @@ import json
 import os
 import tempfile
 from pathlib import Path
-import gc
 
 
 class QTableOptimizationProblem(Problem):
@@ -241,7 +240,6 @@ class QTableOptimizationProblem(Problem):
                         print(f"Temporal eliminado: {os.path.basename(q_table_path)}")
                     except Exception as e:
                         print(f"No se pudo eliminar {q_table_path}: {e}")
-                gc.collect()
         # Limpieza adicional: asegurar que todos los archivos temporales fueron eliminados
         for temp_file in temp_files_created:
             if os.path.exists(temp_file):
