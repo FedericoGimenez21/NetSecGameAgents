@@ -69,8 +69,8 @@ class SensitivityAnalyzer:
                 'pm_eta'
             ],
             'bounds': [
-                [20, 30],          # population_size: 20-30
-                [10, 20],          # n_generations: 10-20
+                [10, 20],          # population_size: 10-20
+                [10, 20],          # n_generations: 20-30
                 [0.8, 1.0],      # sbx_prob: probabilidad de SBX
                 [0, 60],         # sbx_eta: índice de distribución SBX
                 [0.01, 0.6],     # pm_prob_var: probabilidad por variable de PM
@@ -81,7 +81,7 @@ class SensitivityAnalyzer:
         # Valores fijos (no varían en el análisis)
         self.sbx_prob_var = 1.0  # prob_var para SBX fijo en 1
         self.pm_prob = 1.0       # prob para PM fijo en 1
-        self.test_episodes = 25  # test_episodes fijo
+        self.test_episodes = 20  # test_episodes fijo
         
         # Rango de reward adaptado al análisis previo
         self.reward_range = (-1000, 1000)
@@ -253,47 +253,106 @@ class SensitivityAnalyzer:
     def run_sensitivity_analysis(self, param_values, resume_from=None):
         """
         Ejecuta el análisis de sensibilidad evaluando todas las muestras.
+        Detecta automáticamente el progreso previo y reanuda desde el último punto.
         
         Args:
             param_values (np.ndarray): Matriz de parámetros a evaluar
-            resume_from (int): Índice desde donde resumir (si se interrumpió)
+            resume_from (int): Índice desde donde resumir (si se interrumpió).
+                              Si es None, detecta automáticamente.
             
         Returns:
             np.ndarray: Array de win_rates obtenidos
         """
         n_samples = param_values.shape[0]
         results_file = os.path.join(self.output_dir, 'evaluation_results.npy')
+        progress_file = os.path.join(self.output_dir, 'progress.json')
         
-        # Intentar cargar resultados previos
-        if resume_from is not None and os.path.exists(results_file):
+        # Intentar cargar resultados previos y detectar progreso
+        Y = np.zeros(n_samples)
+        
+        if os.path.exists(results_file):
             Y = np.load(results_file)
-            print(f"Resumiendo desde muestra {resume_from + 1}...\n")
-        else:
-            Y = np.zeros(n_samples)
-            resume_from = 0
+            print(f"Resultados previos cargados desde: {results_file}")
+            
+            # Asegurar que el array tiene el tamaño correcto
+            if len(Y) != n_samples:
+                print(f"ADVERTENCIA: Tamaño de resultados ({len(Y)}) != muestras ({n_samples})")
+                old_Y = Y.copy()
+                Y = np.zeros(n_samples)
+                Y[:min(len(old_Y), n_samples)] = old_Y[:min(len(old_Y), n_samples)]
+        
+        # Detectar automáticamente desde dónde resumir
+        if resume_from is None:
+            resume_from = self._detect_last_completed_sample()
+            if resume_from > 0:
+                print(f"\n{'='*70}")
+                print(f"REANUDACIÓN AUTOMÁTICA DETECTADA")
+                print(f"{'='*70}")
+                print(f"Última muestra completada: {resume_from}")
+                print(f"Reanudando desde muestra: {resume_from + 1}")
+                print(f"{'='*70}\n")
+        
+        # Cargar resultados de muestras ya completadas desde sus directorios
+        Y = self._load_completed_results(Y, resume_from)
+        
+        # Guardar información de progreso
+        self._save_progress(resume_from, n_samples)
         
         print(f"Evaluando {n_samples} muestras...")
-        print(f"Tiempo estimado: ~{n_samples * 0.5:.1f} horas (estimación conservadora)\n")
+        print(f"Muestras completadas: {resume_from}/{n_samples}")
+        print(f"Muestras pendientes: {n_samples - resume_from}")
+        remaining_time = (n_samples - resume_from) * 0.5
+        print(f"Tiempo estimado restante: ~{remaining_time:.1f} horas\n")
         
         try:
             for i in range(resume_from, n_samples):
                 # Evaluar muestra
                 Y[i] = self.evaluate_sample(i, param_values[i])
                 
-                # Guardar resultados parciales cada 10 muestras
+                # Guardar resultados parciales cada muestra (para seguridad)
+                np.save(results_file, Y)
+                
+                # Actualizar progreso
+                self._save_progress(i + 1, n_samples)
+                
+                # Mostrar estadísticas cada 10 muestras
                 if (i + 1) % 10 == 0:
-                    np.save(results_file, Y)
-                    print(f"\nProgreso guardado: {i + 1}/{n_samples} muestras completadas")
-                    print(f"Win rate promedio hasta ahora: {np.mean(Y[:i+1]):.2f}%\n")
+                    print(f"\n{'='*50}")
+                    print(f"PROGRESO: {i + 1}/{n_samples} muestras completadas ({(i+1)/n_samples*100:.1f}%)")
+                    print(f"Win rate promedio hasta ahora: {np.mean(Y[:i+1]):.2f}%")
+                    print(f"Win rate máximo hasta ahora: {np.max(Y[:i+1]):.2f}%")
+                    remaining = n_samples - (i + 1)
+                    print(f"Muestras restantes: {remaining}")
+                    print(f"{'='*50}\n")
         
         except KeyboardInterrupt:
-            print(f"\n\nInterrupción del usuario. Guardando progreso...")
+            print(f"\n\n{'='*70}")
+            print(f"INTERRUPCIÓN DEL USUARIO")
+            print(f"{'='*70}")
             np.save(results_file, Y)
-            print(f"Progreso guardado. Para resumir, ejecutar con resume_from={i}")
+            self._save_progress(i, n_samples, interrupted=True)
+            print(f"Progreso guardado. Última muestra completada: {i}")
+            print(f"Para resumir, simplemente ejecute el script de nuevo.")
+            print(f"El progreso se detectará automáticamente.")
+            print(f"{'='*70}\n")
+            raise
+        
+        except Exception as e:
+            print(f"\n\n{'='*70}")
+            print(f"ERROR DURANTE LA EVALUACIÓN")
+            print(f"{'='*70}")
+            print(f"Error: {e}")
+            np.save(results_file, Y)
+            self._save_progress(i, n_samples, interrupted=True, error=str(e))
+            print(f"Progreso guardado. Última muestra intentada: {i + 1}")
+            print(f"Para resumir, simplemente ejecute el script de nuevo.")
+            print(f"{'='*70}\n")
             raise
         
         # Guardar resultados finales
         np.save(results_file, Y)
+        self._save_progress(n_samples, n_samples, completed=True)
+        
         print(f"\n{'='*70}")
         print(f"EVALUACIÓN COMPLETADA")
         print(f"{'='*70}")
@@ -305,6 +364,111 @@ class SensitivityAnalyzer:
         print(f"{'='*70}\n")
         
         return Y
+    
+    def _detect_last_completed_sample(self):
+        """
+        Detecta automáticamente la última muestra completada exitosamente.
+        
+        Returns:
+            int: Índice de la última muestra completada (0 si ninguna)
+        """
+        last_completed = 0
+        
+        # Método 1: Verificar archivo de progreso
+        progress_file = os.path.join(self.output_dir, 'progress.json')
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r') as f:
+                    progress = json.load(f)
+                    last_completed = progress.get('last_completed', 0)
+                    print(f"Progreso cargado desde archivo: {last_completed} muestras completadas")
+            except:
+                pass
+        
+        # Método 2: Verificar directorios de muestras existentes
+        sample_dirs = []
+        for item in os.listdir(self.output_dir):
+            if item.startswith('sample_') and os.path.isdir(os.path.join(self.output_dir, item)):
+                try:
+                    # Extraer número de muestra
+                    sample_num = int(item.replace('sample_', ''))
+                    # Verificar que tenga los archivos necesarios (éxito)
+                    sample_dir = os.path.join(self.output_dir, item)
+                    hyperparams_file = os.path.join(sample_dir, 'hyperparameters.json')
+                    
+                    if os.path.exists(hyperparams_file):
+                        with open(hyperparams_file, 'r') as f:
+                            hyperparams = json.load(f)
+                            if hyperparams.get('status') == 'success':
+                                sample_dirs.append(sample_num)
+                except:
+                    continue
+        
+        if sample_dirs:
+            dir_last_completed = max(sample_dirs)
+            # Usar el mayor entre archivo de progreso y directorios
+            if dir_last_completed > last_completed:
+                last_completed = dir_last_completed
+                print(f"Detectadas {len(sample_dirs)} muestras completadas en directorios")
+        
+        return last_completed
+    
+    def _load_completed_results(self, Y, up_to_sample):
+        """
+        Carga los resultados de muestras completadas desde sus directorios.
+        
+        Args:
+            Y (np.ndarray): Array de resultados a llenar
+            up_to_sample (int): Cargar hasta esta muestra
+            
+        Returns:
+            np.ndarray: Array actualizado con resultados cargados
+        """
+        loaded_count = 0
+        
+        for sample_idx in range(up_to_sample):
+            sample_dir = os.path.join(self.output_dir, f"sample_{sample_idx + 1:04d}")
+            hyperparams_file = os.path.join(sample_dir, 'hyperparameters.json')
+            
+            if os.path.exists(hyperparams_file):
+                try:
+                    with open(hyperparams_file, 'r') as f:
+                        hyperparams = json.load(f)
+                        if 'win_rate' in hyperparams:
+                            Y[sample_idx] = hyperparams['win_rate']
+                            loaded_count += 1
+                except:
+                    continue
+        
+        if loaded_count > 0:
+            print(f"Cargados {loaded_count} resultados desde directorios de muestras")
+        
+        return Y
+    
+    def _save_progress(self, last_completed, total_samples, interrupted=False, completed=False, error=None):
+        """
+        Guarda el estado de progreso del análisis.
+        
+        Args:
+            last_completed (int): Última muestra completada
+            total_samples (int): Total de muestras
+            interrupted (bool): Si fue interrumpido
+            completed (bool): Si se completó todo
+            error (str): Mensaje de error si hubo uno
+        """
+        progress_file = os.path.join(self.output_dir, 'progress.json')
+        
+        progress = {
+            'last_completed': last_completed,
+            'total_samples': total_samples,
+            'percentage': (last_completed / total_samples * 100) if total_samples > 0 else 0,
+            'status': 'completed' if completed else ('interrupted' if interrupted else 'in_progress'),
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'error': error
+        }
+        
+        with open(progress_file, 'w', encoding='utf-8') as f:
+            json.dump(progress, f, indent=2, ensure_ascii=False)
     
     def analyze_results(self, param_values, Y, calc_second_order=True):
         """
@@ -783,7 +947,21 @@ def main():
     
     parser = argparse.ArgumentParser(
         description='Análisis de Sensibilidad de Hiperparámetros del GA',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Ejemplos de uso:
+  # Ejecutar análisis completo
+  python sensitivity_analysis.py --agent_script path/to/agent.py
+  
+  # Reanudar automáticamente (detecta progreso previo)
+  python sensitivity_analysis.py --agent_script path/to/agent.py
+  
+  # Forzar reinicio desde cero
+  python sensitivity_analysis.py --agent_script path/to/agent.py --force_restart
+  
+  # Solo analizar resultados existentes
+  python sensitivity_analysis.py --agent_script path/to/agent.py --only_analyze
+        """
     )
     
     parser.add_argument("--agent_script", 
@@ -803,11 +981,14 @@ def main():
                        default="sensitivity_results",
                        type=str)
     parser.add_argument("--resume_from",
-                       help="Índice desde donde resumir evaluación",
+                       help="Índice desde donde resumir evaluación (auto-detectado si no se especifica)",
                        default=None,
                        type=int)
     parser.add_argument("--only_analyze",
                        help="Solo analizar resultados existentes (no evaluar)",
+                       action='store_true')
+    parser.add_argument("--force_restart",
+                       help="Forzar reinicio desde cero (ignora progreso previo)",
                        action='store_true')
     
     args = parser.parse_args()
@@ -819,16 +1000,30 @@ def main():
     )
     
     if not args.only_analyze:
-        # Generar muestras
-        param_values = analyzer.generate_samples(
-            n_samples=args.n_samples,
-            calc_second_order=args.second_order
-        )
+        # Verificar si existen muestras previas
+        samples_file = os.path.join(args.output_dir, 'parameter_samples.npy')
         
-        # Evaluar muestras
+        if os.path.exists(samples_file) and not args.force_restart:
+            # Cargar muestras existentes
+            param_values = np.load(samples_file)
+            print(f"Muestras existentes cargadas desde: {samples_file}")
+            print(f"Total de muestras: {len(param_values)}")
+        else:
+            # Generar nuevas muestras
+            if args.force_restart:
+                print("\n¡REINICIO FORZADO! Generando nuevas muestras...\n")
+            param_values = analyzer.generate_samples(
+                n_samples=args.n_samples,
+                calc_second_order=args.second_order
+            )
+        
+        # Configurar resume_from
+        resume_from = 0 if args.force_restart else args.resume_from
+        
+        # Evaluar muestras (detecta automáticamente progreso si resume_from es None)
         Y = analyzer.run_sensitivity_analysis(
             param_values,
-            resume_from=args.resume_from
+            resume_from=resume_from
         )
     else:
         # Cargar resultados existentes
