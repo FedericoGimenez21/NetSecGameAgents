@@ -1008,6 +1008,24 @@ Ejemplos de uso:
             param_values = np.load(samples_file)
             print(f"Muestras existentes cargadas desde: {samples_file}")
             print(f"Total de muestras: {len(param_values)}")
+            
+            # Verificar compatibilidad con el número de parámetros actual
+            expected_params = analyzer.problem['num_vars']
+            actual_params = param_values.shape[1] if len(param_values.shape) > 1 else 0
+            
+            if actual_params != expected_params:
+                print(f"\n{'='*70}")
+                print(f"¡ADVERTENCIA! INCOMPATIBILIDAD DETECTADA")
+                print(f"{'='*70}")
+                print(f"Las muestras existentes tienen {actual_params} parámetros,")
+                print(f"pero el análisis actual requiere {expected_params} parámetros.")
+                print(f"Regenerando muestras automáticamente...")
+                print(f"{'='*70}\n")
+                
+                param_values = analyzer.generate_samples(
+                    n_samples=args.n_samples,
+                    calc_second_order=args.second_order
+                )
         else:
             # Generar nuevas muestras
             if args.force_restart:
