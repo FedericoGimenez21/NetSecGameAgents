@@ -15,6 +15,11 @@ import json
 import os
 import tempfile
 from pathlib import Path
+import optuna
+from optuna.pruners import MedianPruner
+from optuna.samplers import TPESampler
+import logging
+from datetime import datetime
 
 
 class QTableOptimizationProblem(Problem):
@@ -382,12 +387,8 @@ class QTableGeneticOptimizer:
     def optimize(self, 
                  population_size=10,
                  n_generations=1,
-                 sbx_prob=0.9,
-                 sbx_prob_var=1.0,
-                 sbx_eta=15,
-                 pm_prob=1.0,
-                 pm_prob_var=0.1,
-                 pm_eta=20,
+                 crossover_prob=0.8,
+                 mutation_prob=0.2,
                  verbose=True):
         """
         Ejecuta la optimización usando algoritmo genético.
@@ -398,12 +399,8 @@ class QTableGeneticOptimizer:
         Args:
             population_size (int): Tamaño de la población
             n_generations (int): Número de generaciones
-            sbx_prob (float): Probabilidad de cruzar un par de padres (SBX)
-            sbx_prob_var (float): Probabilidad por variable en SBX
-            sbx_eta (float): Índice de distribución SBX
-            pm_prob (float): Probabilidad de mutar el individuo (PM)
-            pm_prob_var (float): Probabilidad de mutar cada gen/variable (PM)
-            pm_eta (float): Índice de distribución PM
+            crossover_prob (float): Probabilidad de cruzamiento
+            mutation_prob (float): Probabilidad de mutación
             verbose (bool): Mostrar progreso
         
         Returns:
@@ -418,16 +415,17 @@ class QTableGeneticOptimizer:
         print(f"Población: {population_size}")
         print(f"Generaciones: {n_generations}")
         print(f"Rango de Q-values: {self.reward_range}")
-        print(f"SBX - prob: {sbx_prob}, prob_var: {sbx_prob_var}, eta: {sbx_eta}")
-        print(f"PM  - prob: {pm_prob}, prob_var: {pm_prob_var}, eta: {pm_eta}")
+        print(f"Mutation_prob: {mutation_prob}")
+        print(f"Crossover_prob: {crossover_prob}")
+
         print("="*70 + "\n")
         
         # Configurar algoritmo genético
         algorithm = GA(
             pop_size=population_size,
             sampling=FloatRandomSampling(),
-            crossover=SBX(prob=sbx_prob, prob_var=sbx_prob_var, eta=sbx_eta),
-            mutation=PM(prob=pm_prob, prob_var=pm_prob_var, eta=pm_eta),
+            crossover=SBX(prob=crossover_prob, eta=15),
+            mutation=PM(prob=mutation_prob, eta=20),
             eliminate_duplicates=True
         )
         
@@ -589,6 +587,231 @@ class QTableGeneticOptimizer:
         print("="*70 + "\n")
 
 
+def setup_optuna_logging(log_dir="optuna_logs"):
+    """Configura logging para Optuna"""
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"optuna_{timestamp}.log")
+    
+    # Configurar logger de Optuna
+    optuna.logging.get_logger("optuna").addHandler(logging.FileHandler(log_file))
+    optuna.logging.set_verbosity(optuna.logging.INFO)
+    
+    return log_file
+
+
+def objective_function(trial, base_config):
+    """
+    Función objetivo para Optuna que optimiza los hiperparámetros del GA.
+    
+    Args:
+        trial: Objeto trial de Optuna
+        base_config: Configuración base con parámetros fijos
+        
+    Returns:
+        float: Mejor win_rate obtenido (valor a maximizar)
+    """
+    # Sugerir hiperparámetros (rangos ajustados para ~2.5 horas por trial)
+    population_size = trial.suggest_int('population_size', 5, 6)
+    n_generations = trial.suggest_int('n_generations', 2, 3)
+    crossover_prob = trial.suggest_float('crossover_prob', 0.5, 0.95)
+    mutation_prob = trial.suggest_float('mutation_prob', 0.0001, 0.01, log=True)
+    #reward_min = trial.suggest_float('reward_min', -2.0, -0.5)
+    #reward_max = trial.suggest_float('reward_max', 0.5, 2.0)
+    test_episodes = trial.suggest_int('test_episodes', 25,30)
+    
+    reward_range = (-1, 1)
+    
+    print(f"\n{'='*70}")
+    print(f"OPTUNA TRIAL {trial.number}")
+    print(f"{'='*70}")
+    print(f"Hiperparámetros sugeridos:")
+    print(f"  population_size: {population_size}")
+    print(f"  n_generations: {n_generations}")
+    print(f"  crossover_prob: {crossover_prob:.4f}")
+    print(f"  mutation_prob: {mutation_prob:.6f}")
+    #print(f"  reward_range: ({reward_min:.2f}, {reward_max:.2f})")
+    print(f"  test_episodes: {test_episodes}")
+    print(f"{'='*70}\n")
+    
+    try:
+        # Crear optimizador con hiperparámetros sugeridos
+        optimizer = QTableGeneticOptimizer(
+            agent_script_path=base_config['agent_script_path'],
+            host=base_config['host'],
+            port=base_config['port'],
+            test_episodes=test_episodes,
+            reward_range=reward_range,
+            actions_file=base_config['actions_file'],
+            states_file=base_config['states_file']
+        )
+        
+        # Ejecutar optimización
+        optimized_q_table = optimizer.optimize(
+            population_size=population_size,
+            n_generations=n_generations,
+            crossover_prob=crossover_prob,
+            mutation_prob=mutation_prob,
+            verbose=True
+        )
+        
+        # Obtener el mejor fitness (último valor del historial)
+        best_fitness = optimizer.optimization_history[-1]
+        # Convertir a float si es numpy array
+        if isinstance(best_fitness, np.ndarray):
+            best_fitness = float(best_fitness.item() if best_fitness.size == 1 else best_fitness[0])
+        best_win_rate = float(-best_fitness)
+        
+        # Reportar valores intermedios para pruning
+        for gen, fitness in enumerate(optimizer.optimization_history):
+            fitness_val = float(fitness.item() if isinstance(fitness, np.ndarray) and fitness.size == 1 else fitness)
+            trial.report(-fitness_val, gen)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+        
+        print(f"\nTrial {trial.number} completado: win_rate = {best_win_rate:.2f}%\n")
+        
+        # Guardar Q-table del trial si es mejor que el anterior
+        if trial.number == 0 or best_win_rate > trial.study.best_value:
+            output_file = f"optuna_trial_{trial.number}_wr_{best_win_rate:.1f}.pickle"
+            optimizer.save_q_table(output_file)
+            trial.set_user_attr('q_table_file', output_file)
+        
+        return best_win_rate
+        
+    except optuna.TrialPruned:
+        print(f"\nTrial {trial.number} podado por Optuna\n")
+        raise
+    except Exception as e:
+        print(f"\nError en trial {trial.number}: {e}\n")
+        import traceback
+        traceback.print_exc()
+        return 0.0  # Penalización para trials con error
+
+
+def optimize_with_optuna(base_config, n_trials=20, study_name=None, storage=None):
+    """
+    Ejecuta optimización de hiperparámetros con Optuna.
+    
+    Args:
+        base_config: Diccionario con configuración base (agent_script, host, port, etc.)
+        n_trials: Número de trials a ejecutar
+        study_name: Nombre del estudio (para persistencia)
+        storage: URL de almacenamiento para persistencia (ej: 'sqlite:///optuna.db')
+        
+    Returns:
+        optuna.Study: Objeto estudio con resultados
+    """
+    # Configurar logging
+    log_file = setup_optuna_logging()
+    print(f"Optuna logs guardados en: {log_file}\n")
+    
+    # Crear o cargar estudio
+    if study_name is None:
+        study_name = f"ga_optimization_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    sampler = TPESampler(seed=42)  # Sampler con seed para reproducibilidad
+    pruner = MedianPruner(n_startup_trials=3, n_warmup_steps=5)
+    
+    study = optuna.create_study(
+        study_name=study_name,
+        storage=storage,
+        load_if_exists=True,
+        direction='maximize',  # Maximizar win_rate
+        sampler=sampler,
+        pruner=pruner
+    )
+    
+    print(f"\n{'='*70}")
+    print(f"INICIANDO OPTIMIZACIÓN CON OPTUNA")
+    print(f"{'='*70}")
+    print(f"Estudio: {study_name}")
+    print(f"Trials a ejecutar: {n_trials}")
+    print(f"Sampler: TPESampler")
+    print(f"Pruner: MedianPruner")
+    if storage:
+        print(f"Almacenamiento: {storage}")
+    print(f"{'='*70}\n")
+    
+    # Optimizar
+    study.optimize(
+        lambda trial: objective_function(trial, base_config),
+        n_trials=n_trials,
+        show_progress_bar=True,
+        catch=(Exception,)  # Capturar excepciones sin detener el estudio
+    )
+    
+    # Mostrar resultados
+    print(f"\n{'='*70}")
+    print(f"OPTIMIZACIÓN COMPLETADA")
+    print(f"{'='*70}")
+    print(f"Mejor win_rate: {study.best_value:.2f}%")
+    print(f"Mejor trial: {study.best_trial.number}")
+    print(f"\nMejores hiperparámetros:")
+    for key, value in study.best_params.items():
+        print(f"  {key}: {value}")
+    print(f"{'='*70}\n")
+    
+    # Guardar resultados
+    results_file = f"optuna_results_{study_name}.json"
+    with open(results_file, 'w') as f:
+        json.dump({
+            'study_name': study_name,
+            'best_value': study.best_value,
+            'best_params': study.best_params,
+            'best_trial': study.best_trial.number,
+            'n_trials': len(study.trials),
+            'q_table_file': study.best_trial.user_attrs.get('q_table_file', None)
+        }, f, indent=2)
+    print(f"Resultados guardados en: {results_file}\n")
+    
+    return study
+
+
+def plot_optuna_results(study, save_dir="optuna_plots"):
+    """
+    Genera visualizaciones de los resultados de Optuna.
+    
+    Args:
+        study: Objeto optuna.Study
+        save_dir: Directorio donde guardar las gráficas
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    try:
+        # 1. Historial de optimización
+        fig1 = optuna.visualization.plot_optimization_history(study)
+        fig1.write_html(os.path.join(save_dir, "optimization_history.html"))
+        print(f"Gráfica guardada: {save_dir}/optimization_history.html")
+        
+        # 2. Importancia de hiperparámetros
+        fig2 = optuna.visualization.plot_param_importances(study)
+        fig2.write_html(os.path.join(save_dir, "param_importances.html"))
+        print(f"Gráfica guardada: {save_dir}/param_importances.html")
+        
+        # 3. Relaciones entre parámetros
+        fig3 = optuna.visualization.plot_parallel_coordinate(study)
+        fig3.write_html(os.path.join(save_dir, "parallel_coordinate.html"))
+        print(f"Gráfica guardada: {save_dir}/parallel_coordinate.html")
+        
+        # 4. Slice plot (relación individual)
+        fig4 = optuna.visualization.plot_slice(study)
+        fig4.write_html(os.path.join(save_dir, "slice_plot.html"))
+        print(f"Gráfica guardada: {save_dir}/slice_plot.html")
+        
+        # 5. Contour plot (relación entre pares)
+        fig5 = optuna.visualization.plot_contour(study)
+        fig5.write_html(os.path.join(save_dir, "contour_plot.html"))
+        print(f"Gráfica guardada: {save_dir}/contour_plot.html")
+        
+        print(f"\nTodas las visualizaciones guardadas en: {save_dir}/\n")
+        
+    except Exception as e:
+        print(f"Error generando visualizaciones: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def main():
     """
     Función principal para ejecutar la optimización de Q-table con algoritmo genético.
@@ -642,29 +865,13 @@ Ejemplo de uso:
                        help="Número de generaciones del GA",
                        default=10,
                        type=int)
-    parser.add_argument("--sbx_prob",
-                       help="Probabilidad de cruzar un par de padres (SBX)",
-                       default=0.9,
+    parser.add_argument("--crossover_prob",
+                       help="Probabilidad de cruzamiento",
+                       default=0.8,
                        type=float)
-    parser.add_argument("--sbx_prob_var",
-                       help="Probabilidad por variable en SBX",
-                       default=1.0,
-                       type=float)
-    parser.add_argument("--sbx_eta",
-                       help="Índice de distribución SBX",
-                       default=15.0,
-                       type=float)
-    parser.add_argument("--pm_prob",
-                       help="Probabilidad de mutar el individuo (PM)",
-                       default=1.0,
-                       type=float)
-    parser.add_argument("--pm_prob_var",
-                       help="Probabilidad de mutar cada gen/variable (PM)",
-                       default=0.1,
-                       type=float)
-    parser.add_argument("--pm_eta",
-                       help="Índice de distribución PM",
-                       default=20.0,
+    parser.add_argument("--mutation_prob",
+                       help="Probabilidad de mutación",
+                       default=0.0005,
                        type=float)
     parser.add_argument("--reward_range",
                        help="Rango de valores para Q-values (min,max)",
@@ -676,6 +883,21 @@ Ejemplo de uso:
                        type=str)
     parser.add_argument("--plot",
                        help="Ruta donde guardar la gráfica de progreso (opcional)",
+                       default=None,
+                       type=str)
+    parser.add_argument("--optuna",
+                       help="Activar optimización de hiperparámetros con Optuna",
+                       action='store_true')
+    parser.add_argument("--optuna_trials",
+                       help="Número de trials para Optuna (recomendado: 10-20)",
+                       default=10,
+                       type=int)
+    parser.add_argument("--optuna_study",
+                       help="Nombre del estudio Optuna (para persistencia)",
+                       default=None,
+                       type=str)
+    parser.add_argument("--optuna_storage",
+                       help="URL de almacenamiento para Optuna (ej: sqlite:///optuna.db)",
                        default=None,
                        type=str)
     
@@ -704,56 +926,116 @@ Ejemplo de uso:
     print("Para NetSecGame - Q-Learning Agent")
     print("="*70)
     
-    # Crear el optimizador
-    optimizer = QTableGeneticOptimizer(
-        agent_script_path=args.agent_script,
-        host=args.host,
-        port=args.port,
-        test_episodes=args.test_episodes,
-        reward_range=reward_range,
-        actions_file=args.actions,
-        states_file=args.states
-    )
+    # Modo Optuna: Optimización de hiperparámetros
+    if args.optuna:
+        print("\nMODO: Optimización de hiperparámetros con Optuna\n")
+        
+        # Configuración base para Optuna
+        base_config = {
+            'agent_script_path': args.agent_script,
+            'host': args.host,
+            'port': args.port,
+            'actions_file': args.actions,
+            'states_file': args.states
+        }
+        
+        # Ejecutar optimización con Optuna
+        study = optimize_with_optuna(
+            base_config=base_config,
+            n_trials=args.optuna_trials,
+            study_name=args.optuna_study,
+            storage=args.optuna_storage
+        )
+        
+        # Generar visualizaciones
+        plot_optuna_results(study)
+        
+        # Entrenar modelo final con mejores hiperparámetros
+        print(f"\n{'='*70}")
+        print("ENTRENANDO MODELO FINAL CON MEJORES HIPERPARÁMETROS")
+        print(f"{'='*70}\n")
+        
+        best_params = study.best_params
+        optimizer = QTableGeneticOptimizer(
+            agent_script_path=args.agent_script,
+            host=args.host,
+            port=args.port,
+            test_episodes=best_params['test_episodes'],
+            reward_range=(best_params['reward_min'], best_params['reward_max']),
+            actions_file=args.actions,
+            states_file=args.states
+        )
+        
+        # Ejecutar optimización
+        optimizer.optimize(
+            population_size=best_params['population_size'],
+            n_generations=best_params['n_generations'],
+            crossover_prob=best_params['crossover_prob'],
+            mutation_prob=best_params['mutation_prob'],
+            verbose=True
+        )
+        
+        # Guardar modelo final
+        final_output = args.output.replace('.pickle', '_optuna_best.pickle')
+        optimizer.save_q_table(final_output)
+        optimizer.plot_optimization_progress(save_path=args.plot)
+        
+        print(f"\n{'='*70}")
+        print("OPTIMIZACIÓN CON OPTUNA COMPLETADA")
+        print(f"{'='*70}")
+        print(f"Resultados de Optuna guardados en: optuna_results_{study.study_name}.json")
+        print(f"Visualizaciones en: optuna_plots/")
+        print(f"Mejor Q-table guardada en: {final_output}")
+        print(f"{'='*70}\n")
     
-    # Ejecutar optimización
-    optimized_q_table = optimizer.optimize(
-        population_size=args.population,
-        n_generations=args.generations,
-        sbx_prob=args.sbx_prob,
-        sbx_prob_var=args.sbx_prob_var,
-        sbx_eta=args.sbx_eta,
-        pm_prob=args.pm_prob,
-        pm_prob_var=args.pm_prob_var,
-        pm_eta=args.pm_eta,
-        verbose=True
-    )
-    
-    # Analizar resultados
-    #optimizer.analyze_q_table()
-    
-    # Guardar la Q-table optimizada
-    optimizer.save_q_table(args.output)
-    
-    # Mostrar progreso de optimización
-    optimizer.plot_optimization_progress(save_path=args.plot)
-    
-    print("\n" + "="*70)
-    print("INSTRUCCIONES PARA USAR LA Q-TABLE OPTIMIZADA")
-    print("="*70)
-    print(f"1. La Q-table ha sido guardada en: {args.output}")
-    print(f"2. Para usarla en el agente, cárgala con:")
-    print(f"   python q_agent_feature_based.py --previous_model {args.output} ...")
-    print(f"3. La Q-table usa una representación paramétrica basada en características")
-    print(f"4. Durante el entrenamiento, se irán agregando entradas específicas")
-    print("="*70 + "\n")
-    
-    return optimized_q_table
+    # Modo normal: Ejecutar GA con hiperparámetros fijos
+    else:
+        print("\nMODO: Ejecución estándar con hiperparámetros fijos\n")
+        
+        # Crear el optimizador
+        optimizer = QTableGeneticOptimizer(
+            agent_script_path=args.agent_script,
+            host=args.host,
+            port=args.port,
+            test_episodes=args.test_episodes,
+            reward_range=reward_range,
+            actions_file=args.actions,
+            states_file=args.states
+        )
+        
+        # Ejecutar optimización
+        optimizer.optimize(
+            population_size=args.population,
+            n_generations=args.generations,
+            crossover_prob=args.crossover_prob,
+            mutation_prob=args.mutation_prob,
+            verbose=True
+        )
+        
+        # Analizar resultados
+        #optimizer.analyze_q_table()
+        
+        # Guardar la Q-table optimizada
+        optimizer.save_q_table(args.output)
+        
+        # Mostrar progreso de optimización
+        optimizer.plot_optimization_progress(save_path=args.plot)
+        
+        print("\n" + "="*70)
+        print("INSTRUCCIONES PARA USAR LA Q-TABLE OPTIMIZADA")
+        print("="*70)
+        print(f"1. La Q-table ha sido guardada en: {args.output}")
+        print(f"2. Para usarla en el agente, cárgala con:")
+        print(f"   python q_agent_feature_based.py --previous_model {args.output} ...")
+        print(f"3. La Q-table usa una representación paramétrica basada en características")
+        print(f"4. Durante el entrenamiento, se irán agregando entradas específicas")
+        print("="*70 + "\n")
 
 
 if __name__ == "__main__":
     # Ejecutar optimización
     try:
-        q_table = main()
+        main()
         print("\n✓ Optimización completada exitosamente!")
     except KeyboardInterrupt:
         print("\n\n✗ Optimización interrumpida por el usuario")
