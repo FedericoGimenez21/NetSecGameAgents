@@ -1,6 +1,6 @@
 {
   "sample_idx": 3,
-  "population_size": 10,
+  "population_size": 11,
   "n_generations": 18,
   "sbx_prob": 0.89375,
   "sbx_prob_var": 1.0,
@@ -13,13 +13,13 @@
     -1000,
     1000
   ],
-  "timestamp": "2026-01-02 16:13:01",
+  "timestamp": "2026-01-03 15:33:49",
   "win_rate": 25.0,
   "best_fitness": -25.0,
   "optimization_history": [
-    -15.0,
     -20.0,
-    -25.0,
+    -20.0,
+    -20.0,
     -25.0,
     -25.0,
     -25.0,
