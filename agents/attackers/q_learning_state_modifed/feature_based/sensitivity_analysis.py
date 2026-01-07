@@ -18,6 +18,8 @@ from datetime import datetime
 import os
 import sys
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 # Importar el optimizador
 from ga import QTableGeneticOptimizer
@@ -35,7 +37,8 @@ class SensitivityAnalyzer:
                  port=9000,
                  actions_file="registration_info.json",
                  states_file="estadosSMALL.json",
-                 output_dir="sensitivity_results"):
+                 output_dir="sensitivity_results",
+                 n_workers=None):
         """
         Inicializa el analizador de sensibilidad.
         
@@ -46,6 +49,7 @@ class SensitivityAnalyzer:
             actions_file (str): Archivo de acciones
             states_file (str): Archivo de estados
             output_dir (str): Directorio para guardar resultados
+            n_workers (int): Número de procesos paralelos (None = usar todos los CPUs)
         """
         self.agent_script_path = agent_script_path
         self.host = host
@@ -53,6 +57,12 @@ class SensitivityAnalyzer:
         self.actions_file = actions_file
         self.states_file = states_file
         self.output_dir = output_dir
+        
+        # Configurar número de workers
+        if n_workers is None:
+            self.n_workers = max(1, multiprocessing.cpu_count() - 1)
+        else:
+            self.n_workers = max(1, n_workers)
         
         # Crear directorio de salida
         os.makedirs(output_dir, exist_ok=True)
@@ -69,8 +79,8 @@ class SensitivityAnalyzer:
                 'pm_eta'
             ],
             'bounds': [
-                [10, 20],          # population_size: 10-20
-                [10, 20],          # n_generations: 20-30
+                [1, 2],          # population_size: 4-10
+                [1, 2],          # n_generations: 4-10
                 [0.8, 1.0],      # sbx_prob: probabilidad de SBX
                 [0, 60],         # sbx_eta: índice de distribución SBX
                 [0.01, 0.6],     # pm_prob_var: probabilidad por variable de PM
@@ -81,7 +91,7 @@ class SensitivityAnalyzer:
         # Valores fijos (no varían en el análisis)
         self.sbx_prob_var = 1.0  # prob_var para SBX fijo en 1
         self.pm_prob = 1.0       # prob para PM fijo en 1
-        self.test_episodes = 20  # test_episodes fijo
+        self.test_episodes = 15  # test_episodes fijo
         
         # Rango de reward adaptado al análisis previo
         self.reward_range = (-1000, 1000)
@@ -93,6 +103,8 @@ class SensitivityAnalyzer:
         print(f"Rangos definidos:")
         for name, bounds in zip(self.problem['names'], self.problem['bounds']):
             print(f"  {name}: [{bounds[0]}, {bounds[1]}]")
+        print(f"Número de workers paralelos: {self.n_workers}")
+        print(f"CPUs disponibles: {multiprocessing.cpu_count()}")
         print("="*70 + "\n")
     
     def generate_samples(self, n_samples=1024, calc_second_order=True):
@@ -252,7 +264,7 @@ class SensitivityAnalyzer:
     
     def run_sensitivity_analysis(self, param_values, resume_from=None):
         """
-        Ejecuta el análisis de sensibilidad evaluando todas las muestras.
+        Ejecuta el análisis de sensibilidad evaluando todas las muestras en paralelo.
         Detecta automáticamente el progreso previo y reanuda desde el último punto.
         
         Args:
@@ -298,40 +310,69 @@ class SensitivityAnalyzer:
         # Guardar información de progreso
         self._save_progress(resume_from, n_samples)
         
-        print(f"Evaluando {n_samples} muestras...")
+        print(f"Evaluando {n_samples} muestras en paralelo...")
+        print(f"Workers paralelos: {self.n_workers}")
         print(f"Muestras completadas: {resume_from}/{n_samples}")
         print(f"Muestras pendientes: {n_samples - resume_from}")
-        remaining_time = (n_samples - resume_from) * 0.5
+        remaining_time = (n_samples - resume_from) * 1 / self.n_workers
         print(f"Tiempo estimado restante: ~{remaining_time:.1f} horas\n")
         
         try:
-            for i in range(resume_from, n_samples):
-                # Evaluar muestra
-                Y[i] = self.evaluate_sample(i, param_values[i])
+            # Crear lista de tareas pendientes
+            pending_indices = list(range(resume_from, n_samples))
+            completed_count = resume_from
+            
+            # Usar ProcessPoolExecutor para paralelización
+            with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+                # Enviar todas las tareas
+                future_to_idx = {
+                    executor.submit(self._evaluate_sample_wrapper, i, param_values[i]): i
+                    for i in pending_indices
+                }
                 
-                # Guardar resultados parciales cada muestra (para seguridad)
-                np.save(results_file, Y)
-                
-                # Actualizar progreso
-                self._save_progress(i + 1, n_samples)
-                
-                # Mostrar estadísticas cada 10 muestras
-                if (i + 1) % 10 == 0:
-                    print(f"\n{'='*50}")
-                    print(f"PROGRESO: {i + 1}/{n_samples} muestras completadas ({(i+1)/n_samples*100:.1f}%)")
-                    print(f"Win rate promedio hasta ahora: {np.mean(Y[:i+1]):.2f}%")
-                    print(f"Win rate máximo hasta ahora: {np.max(Y[:i+1]):.2f}%")
-                    remaining = n_samples - (i + 1)
-                    print(f"Muestras restantes: {remaining}")
-                    print(f"{'='*50}\n")
+                # Procesar resultados conforme se completan
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    
+                    try:
+                        win_rate = future.result()
+                        Y[idx] = win_rate
+                        completed_count += 1
+                        
+                        # Guardar resultados parciales
+                        np.save(results_file, Y)
+                        self._save_progress(completed_count, n_samples)
+                        
+                        # Mostrar progreso
+                        progress_pct = (completed_count / n_samples) * 100
+                        print(f"[{completed_count}/{n_samples}] Muestra {idx + 1} completada: {win_rate:.2f}% (Progreso: {progress_pct:.1f}%)")
+                        
+                        # Mostrar estadísticas cada 10 muestras o cuando todas completen
+                        if completed_count % 10 == 0 or completed_count == n_samples:
+                            completed_results = Y[Y != 0]  # Filtrar ceros (no completados)
+                            if len(completed_results) > 0:
+                                print(f"\n{'='*50}")
+                                print(f"PROGRESO: {completed_count}/{n_samples} muestras completadas ({progress_pct:.1f}%)")
+                                print(f"Win rate promedio: {np.mean(completed_results):.2f}%")
+                                print(f"Win rate máximo: {np.max(completed_results):.2f}%")
+                                print(f"Muestras restantes: {n_samples - completed_count}")
+                                print(f"{'='*50}\n")
+                    
+                    except Exception as e:
+                        print(f"\nError en muestra {idx + 1}: {e}")
+                        Y[idx] = 0.0
+                        completed_count += 1
+                        
+                        np.save(results_file, Y)
+                        self._save_progress(completed_count, n_samples)
         
         except KeyboardInterrupt:
             print(f"\n\n{'='*70}")
             print(f"INTERRUPCIÓN DEL USUARIO")
             print(f"{'='*70}")
             np.save(results_file, Y)
-            self._save_progress(i, n_samples, interrupted=True)
-            print(f"Progreso guardado. Última muestra completada: {i}")
+            self._save_progress(completed_count, n_samples, interrupted=True)
+            print(f"Progreso guardado. Muestras completadas: {completed_count}")
             print(f"Para resumir, simplemente ejecute el script de nuevo.")
             print(f"El progreso se detectará automáticamente.")
             print(f"{'='*70}\n")
@@ -343,8 +384,8 @@ class SensitivityAnalyzer:
             print(f"{'='*70}")
             print(f"Error: {e}")
             np.save(results_file, Y)
-            self._save_progress(i, n_samples, interrupted=True, error=str(e))
-            print(f"Progreso guardado. Última muestra intentada: {i + 1}")
+            self._save_progress(completed_count, n_samples, interrupted=True, error=str(e))
+            print(f"Progreso guardado. Muestras completadas: {completed_count}")
             print(f"Para resumir, simplemente ejecute el script de nuevo.")
             print(f"{'='*70}\n")
             raise
@@ -364,6 +405,19 @@ class SensitivityAnalyzer:
         print(f"{'='*70}\n")
         
         return Y
+    
+    def _evaluate_sample_wrapper(self, sample_idx, params):
+        """
+        Wrapper para evaluate_sample que es serializable para multiprocessing.
+        
+        Args:
+            sample_idx (int): Índice de la muestra
+            params (np.ndarray): Vector de hiperparámetros
+            
+        Returns:
+            float: Win rate obtenido
+        """
+        return self.evaluate_sample(sample_idx, params)
     
     def _detect_last_completed_sample(self):
         """
@@ -990,13 +1044,18 @@ Ejemplos de uso:
     parser.add_argument("--force_restart",
                        help="Forzar reinicio desde cero (ignora progreso previo)",
                        action='store_true')
+    parser.add_argument("--n_workers",
+                       help="Número de procesos paralelos (default: CPUs-1)",
+                       default=None,
+                       type=int)
     
     args = parser.parse_args()
     
     # Crear analizador
     analyzer = SensitivityAnalyzer(
         agent_script_path=args.agent_script,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        n_workers=args.n_workers
     )
     
     if not args.only_analyze:
