@@ -79,8 +79,8 @@ class SensitivityAnalyzer:
                 'pm_eta'
             ],
             'bounds': [
-                [1, 2],          # population_size: 4-10
-                [1, 2],          # n_generations: 4-10
+                [4, 10],          # population_size: 4-10
+                [4, 10],          # n_generations: 4-10
                 [0.8, 1.0],      # sbx_prob: probabilidad de SBX
                 [0, 60],         # sbx_eta: índice de distribución SBX
                 [0.01, 0.6],     # pm_prob_var: probabilidad por variable de PM
