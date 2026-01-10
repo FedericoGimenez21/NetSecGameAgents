@@ -1,0 +1,26 @@
+{
+  "sample_idx": 704,
+  "population_size": 9,
+  "n_generations": 4,
+  "sbx_prob": 0.87421875,
+  "sbx_prob_var": 1.0,
+  "sbx_eta": 19.921875,
+  "pm_prob": 1.0,
+  "pm_prob_var": 0.1828515625,
+  "pm_eta": 28.359375,
+  "test_episodes": 15,
+  "reward_range": [
+    -1000,
+    1000
+  ],
+  "timestamp": "2026-01-08 22:52:42",
+  "win_rate": 33.333,
+  "best_fitness": -33.333,
+  "optimization_history": [
+    -6.667,
+    -20.0,
+    -33.333,
+    -33.333
+  ],
+  "status": "success"
+}

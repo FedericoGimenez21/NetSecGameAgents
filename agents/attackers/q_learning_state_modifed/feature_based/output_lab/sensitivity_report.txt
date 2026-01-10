@@ -1,0 +1,101 @@
+======================================================================
+REPORTE DE ANÁLISIS DE SENSIBILIDAD
+Fecha: 2026-01-10 06:02:35
+======================================================================
+
+1. RESUMEN EJECUTIVO
+----------------------------------------------------------------------
+Número de muestras evaluadas: 1400
+Win rate promedio: 16.58%
+Desviación estándar: 6.76%
+Win rate mínimo: 0.00%
+Win rate máximo: 40.00%
+
+2. HIPERPARÁMETROS ANALIZADOS
+----------------------------------------------------------------------
+  • population_size: [4, 10]
+  • n_generations: [4, 10]
+  • sbx_prob: [0.8, 1.0]
+  • sbx_eta: [0, 60]
+  • pm_prob_var: [0.01, 0.6]
+  • pm_eta: [0, 60]
+
+3. ÍNDICES DE SOBOL DE PRIMER ORDEN (S1)
+----------------------------------------------------------------------
+Miden el efecto directo de cada hiperparámetro en el win_rate.
+
+  population_size     : 0.2941 ± 0.2648
+  n_generations       : 0.3002 ± 0.2627
+  sbx_prob            : 0.0779 ± 0.2823
+  sbx_eta             : 0.0124 ± 0.2761
+  pm_prob_var         : 0.0609 ± 0.2639
+  pm_eta              : -0.0123 ± 0.2200
+
+4. ÍNDICES DE SOBOL TOTALES (ST)
+----------------------------------------------------------------------
+Miden el efecto total (directo + interacciones) de cada hiperparámetro.
+
+  population_size     : 1.0362 ± 0.3025
+  n_generations       : 1.0096 ± 0.3412
+  sbx_prob            : 0.9884 ± 0.2917
+  sbx_eta             : 0.9352 ± 0.3151
+  pm_prob_var         : 0.9511 ± 0.3208
+  pm_eta              : 0.7599 ± 0.2467
+
+5. ÍNDICES DE INTERACCIÓN (ST - S1)
+----------------------------------------------------------------------
+Miden el efecto de interacciones con otros hiperparámetros.
+
+  population_size     : 0.7420
+  n_generations       : 0.7094
+  sbx_prob            : 0.9105
+  sbx_eta             : 0.9228
+  pm_prob_var         : 0.8902
+  pm_eta              : 0.7722
+
+6. RANKING DE IMPORTANCIA (por ST)
+----------------------------------------------------------------------
+  1. population_size     : 1.0362
+  2. n_generations       : 1.0096
+  3. sbx_prob            : 0.9884
+  4. pm_prob_var         : 0.9511
+  5. sbx_eta             : 0.9352
+  6. pm_eta              : 0.7599
+
+7. INTERACCIONES DE SEGUNDO ORDEN MÁS SIGNIFICATIVAS
+----------------------------------------------------------------------
+  sbx_prob        × pm_prob_var    : 0.4153
+  population_size × n_generations  : -0.2623
+  sbx_eta         × pm_eta         : 0.2413
+  sbx_eta         × pm_prob_var    : 0.1988
+  population_size × pm_eta         : -0.1985
+  population_size × sbx_eta        : -0.1879
+  population_size × sbx_prob       : -0.1454
+  sbx_prob        × sbx_eta        : 0.1390
+  pm_prob_var     × pm_eta         : 0.1215
+  n_generations   × sbx_eta        : -0.1140
+
+8. INTERPRETACIÓN Y RECOMENDACIONES
+----------------------------------------------------------------------
+El hiperparámetro más influyente es 'population_size' (ST = 1.0362),
+lo que indica que tiene el mayor impacto en el win_rate del agente.
+
+Hiperparámetros con interacciones significativas:
+  • population_size: interacción = 0.7420
+  • n_generations: interacción = 0.7094
+  • sbx_prob: interacción = 0.9105
+  • sbx_eta: interacción = 0.9228
+  • pm_prob_var: interacción = 0.8902
+  • pm_eta: interacción = 0.7722
+
+Esto sugiere que estos hiperparámetros deben ser optimizados
+conjuntamente para obtener los mejores resultados.
+
+Recomendaciones:
+  1. Priorizar la optimización del hiperparámetro más influyente
+  2. Considerar interacciones al ajustar hiperparámetros relacionados
+  3. Hiperparámetros con bajo ST pueden usar valores por defecto
+
+======================================================================
+FIN DEL REPORTE
+======================================================================

@@ -1,0 +1,30 @@
+{
+  "sample_idx": 917,
+  "population_size": 7,
+  "n_generations": 8,
+  "sbx_prob": 0.81953125,
+  "sbx_prob_var": 1.0,
+  "sbx_eta": 24.140625,
+  "pm_prob": 1.0,
+  "pm_prob_var": 0.45480468749999997,
+  "pm_eta": 1.640625,
+  "test_episodes": 15,
+  "reward_range": [
+    -1000,
+    1000
+  ],
+  "timestamp": "2026-01-09 07:27:41",
+  "win_rate": 13.333,
+  "best_fitness": -13.333,
+  "optimization_history": [
+    -6.667,
+    -6.667,
+    -6.667,
+    -13.333,
+    -13.333,
+    -13.333,
+    -13.333,
+    -13.333
+  ],
+  "status": "success"
+}
