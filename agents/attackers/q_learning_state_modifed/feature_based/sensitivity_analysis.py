@@ -91,7 +91,7 @@ class SensitivityAnalyzer:
         # Valores fijos (no varían en el análisis)
         self.sbx_prob_var = 1.0  # prob_var para SBX fijo en 1
         self.pm_prob = 1.0       # prob para PM fijo en 1
-        self.test_episodes = 15  # test_episodes fijo
+        self.test_episodes = 1  # test_episodes fijo
         
         # Rango de reward adaptado al análisis previo
         self.reward_range = (-1000, 1000)
@@ -543,6 +543,7 @@ class SensitivityAnalyzer:
             self.problem, 
             Y,
             calc_second_order=calc_second_order,
+            num_resamples=10,
             print_to_console=True
         )
         
