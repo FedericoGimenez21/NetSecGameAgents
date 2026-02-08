@@ -1107,7 +1107,7 @@ Ejemplo de uso:
             agent_script_path=args.agent_script,
             host=args.host,
             port=args.port,
-            test_episodes=1,  # test_episodes fijo
+            test_episodes=25,  # test_episodes fijo
             reward_range=(-1, 1),
             actions_file=args.actions,
             states_file=args.states
