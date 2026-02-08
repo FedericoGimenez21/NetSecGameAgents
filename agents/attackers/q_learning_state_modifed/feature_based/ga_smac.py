@@ -694,7 +694,7 @@ class SMACGAObjective:
         pm_eta = config["pm_eta"]
         
         # Valores fijos
-        test_episodes = 1
+        test_episodes = 25
         reward_range = (-1, 1)
         
         print(f"\n{'='*70}")
