@@ -1046,6 +1046,9 @@ Ejemplo de uso:
                        help="Directorio de salida para SMAC3",
                        default="smac_output",
                        type=str)
+    parser.add_argument("--skip_final_training",
+                       help="Omitir el entrenamiento final con mejores hiperparámetros (solo en modo SMAC)",
+                       action='store_true')
     
     args = parser.parse_args()
     
@@ -1097,44 +1100,53 @@ Ejemplo de uso:
         # Generar visualizaciones
         plot_smac_results(objective)
         
-        # Entrenar modelo final con mejores hiperparámetros
-        print(f"\n{'='*70}")
-        print("ENTRENANDO MODELO FINAL CON MEJORES HIPERPARÁMETROS (SMAC)")
-        print(f"{'='*70}\n")
-        
-        best_params = dict(incumbent)
-        optimizer = QTableGeneticOptimizer(
-            agent_script_path=args.agent_script,
-            host=args.host,
-            port=args.port,
-            test_episodes=25,  # test_episodes fijo
-            reward_range=(-1, 1),
-            actions_file=args.actions,
-            states_file=args.states
-        )
-        
-        # Ejecutar optimización final
-        optimizer.optimize(
-            population_size=best_params['population_size'],
-            n_generations=best_params['n_generations'],
-            sbx_prob=best_params['sbx_prob'],
-            sbx_eta=best_params['sbx_eta'],
-            pm_prob_var=best_params['pm_prob_var'],
-            pm_eta=best_params['pm_eta'],
-            verbose=True
-        )
-        
-        # Guardar modelo final
-        final_output = args.output.replace('.pickle', '_smac_best.pickle')
-        optimizer.save_q_table(final_output)
-        optimizer.plot_optimization_progress(save_path=args.plot)
+        # Entrenar modelo final con mejores hiperparámetros (opcional)
+        if not args.skip_final_training:
+            print(f"\n{'='*70}")
+            print("ENTRENANDO MODELO FINAL CON MEJORES HIPERPARÁMETROS (SMAC)")
+            print(f"{'='*70}\n")
+            
+            best_params = dict(incumbent)
+            optimizer = QTableGeneticOptimizer(
+                agent_script_path=args.agent_script,
+                host=args.host,
+                port=args.port,
+                test_episodes=25,  # test_episodes fijo
+                reward_range=(-1, 1),
+                actions_file=args.actions,
+                states_file=args.states
+            )
+            
+            # Ejecutar optimización final
+            optimizer.optimize(
+                population_size=best_params['population_size'],
+                n_generations=best_params['n_generations'],
+                sbx_prob=best_params['sbx_prob'],
+                sbx_eta=best_params['sbx_eta'],
+                pm_prob_var=best_params['pm_prob_var'],
+                pm_eta=best_params['pm_eta'],
+                verbose=True
+            )
+            
+            # Guardar modelo final
+            final_output = args.output.replace('.pickle', '_smac_best.pickle')
+            optimizer.save_q_table(final_output)
+            optimizer.plot_optimization_progress(save_path=args.plot)
+        else:
+            print(f"\n{'='*70}")
+            print("ENTRENAMIENTO FINAL OMITIDO (--skip_final_training activado)")
+            print(f"{'='*70}\n")
+            final_output = None
         
         print(f"\n{'='*70}")
         print("OPTIMIZACIÓN CON SMAC3 COMPLETADA")
         print(f"{'='*70}")
         print(f"Resultados guardados en directorio: {args.smac_output_dir}/")
         print(f"Visualizaciones en: smac_plots/")
-        print(f"Mejor Q-table guardada en: {final_output}")
+        if final_output:
+            print(f"Mejor Q-table guardada en: {final_output}")
+        else:
+            print(f"Nota: No se ejecutó entrenamiento final (--skip_final_training)")
         print(f"{'='*70}\n")
     
     # ================================================================
