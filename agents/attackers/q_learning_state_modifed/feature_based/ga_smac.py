@@ -816,24 +816,33 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output"):
     )
     
     # Configurar el número de configuraciones iniciales (exploración)
-    # Buena práctica: 20% de n_trials para diseño inicial (mínimo 2)
-    # Esto balancea exploración inicial vs. optimización bayesiana
-    n_initial_configs = max(2, int(n_trials * 0.2))
+    # Usamos n_configs_per_hyperparameter para escalar con la dimensionalidad (6 hiperparámetros)
+    # Con 2-3 configs por hiperparámetro: 12-18 configuraciones iniciales
+    # max_ratio=0.3 limita a 30% de n_trials como máximo
+    n_configs_per_hp = 5  # 5 configuraciones por cada uno de los 6 hiperparámetros
     initial_design = HyperparameterOptimizationFacade.get_initial_design(
-        scenario, n_configs=n_initial_configs
+        scenario, 
+        n_configs_per_hyperparameter=n_configs_per_hp,
+        max_ratio=0.3  # Permite hasta 30% de trials para exploración inicial
     )
+    
+    # Calcular número estimado de configuraciones iniciales
+    # min(n_hyperparams * n_configs_per_hp, n_trials * max_ratio)
+    n_hyperparams = 6
+    estimated_initial = min(n_hyperparams * n_configs_per_hp, int(n_trials * 0.3))
     
     print(f"\n{'='*70}")
     print(f"INICIANDO OPTIMIZACIÓN CON SMAC3")
     print(f"{'='*70}")
     print(f"Trials a ejecutar: {n_trials}")
     print(f"Modelo surrogate: Random Forest (default de SMAC)")
-    print(f"Configuraciones iniciales: {n_initial_configs} (~{(n_initial_configs/n_trials)*100:.0f}% de trials)")
+    print(f"Configuraciones por hiperparámetro: {n_configs_per_hp} (6 hiperparámetros = ~{n_hyperparams * n_configs_per_hp} configs)")
+    print(f"Máximo permitido (max_ratio=0.3): {int(n_trials * 0.3)} configs (~{estimated_initial} configs iniciales)")
     print(f"Directorio de salida: {output_dir}")
-    print(f"\nNOTA: SMAC3 puede ejecutar trials adicionales debido a:")
-    print(f"      - Diseño inicial (warm-up del Random Forest)")
-    print(f"      - Validación de la configuración incumbente")
-    print(f"      - Configuraciones por defecto del framework")
+    print(f"\nNOTA: El número real de configuraciones iniciales puede variar debido a:")
+    print(f"      - Limitación por max_ratio (30% de {n_trials} = {int(n_trials * 0.3)} configs máx)")
+    print(f"      - Balance entre exploración (Sobol) y explotación (Bayesiana)")
+    print(f"      SMAC3 puede ejecutar trials adicionales para validación del incumbente.")
     print(f"{'='*70}\n")
     
     # Crear facade SMAC
