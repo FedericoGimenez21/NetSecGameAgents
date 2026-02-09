@@ -657,12 +657,12 @@ class SMACGAObjective:
         """
         cs = ConfigurationSpace(seed=42)
         
-        population_size = Integer("population_size", (2, 4), default=3)
-        n_generations = Integer("n_generations", (2, 4), default=3)
-        sbx_prob = Float("sbx_prob", (0.8, 1.0), default=0.9)
-        sbx_eta = Float("sbx_eta", (0.0, 60.0), default=15.0)
-        pm_prob_var = Float("pm_prob_var", (0.01, 0.6), default=0.1)
-        pm_eta = Float("pm_eta", (0.0, 60.0), default=20.0)
+        population_size = Integer("population_size", (5, 20))
+        n_generations = Integer("n_generations", (5, 20))
+        sbx_prob = Float("sbx_prob", (0.8, 1.0))
+        sbx_eta = Float("sbx_eta", (0.0, 60.0))
+        pm_prob_var = Float("pm_prob_var", (0.01, 0.6))
+        pm_eta = Float("pm_eta", (0.0, 60.0))
         
         cs.add([population_size, n_generations, sbx_prob, sbx_eta, pm_prob_var, pm_eta])
         
