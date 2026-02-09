@@ -779,13 +779,24 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output"):
     combinado con racing agresivo para decidir eficientemente qué configuraciones
     son mejores.
     
+    El diseño inicial usa 20% de n_trials (mínimo 2) para exploración aleatoria
+    inicial, lo cual es una práctica recomendada en optimización bayesiana.
+    
+    IMPORTANTE: SMAC3 puede ejecutar más evaluaciones que n_trials debido a:
+    - Configuraciones del diseño inicial (20% de n_trials)
+    - Configuraciones por defecto automáticas
+    - Validación de la configuración incumbente al final
+    
+    Para n_trials muy bajos (< 10), el número real de evaluaciones puede ser
+    significativamente mayor. Se recomienda usar n_trials >= 10.
+    
     Args:
         base_config: Diccionario con configuración base (agent_script, host, port, etc.)
-        n_trials: Número de trials (evaluaciones) a ejecutar
+        n_trials: Número de trials (evaluaciones) objetivo (el número real puede ser mayor)
         output_dir: Directorio para resultados de SMAC
         
     Returns:
-        tuple: (incumbent_config, objective_instance)
+        tuple: (incumbent_config, objective_instance, smac_instance)
     """
     # Configurar logging
     log_file, logger = setup_smac_logging()
@@ -805,8 +816,11 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output"):
     )
     
     # Configurar el número de configuraciones iniciales (exploración)
+    # Buena práctica: 20% de n_trials para diseño inicial (mínimo 2)
+    # Esto balancea exploración inicial vs. optimización bayesiana
+    n_initial_configs = max(2, int(n_trials * 0.2))
     initial_design = HyperparameterOptimizationFacade.get_initial_design(
-        scenario, n_configs=min(3, n_trials)  # Al menos 3 configs aleatorias para warm-up
+        scenario, n_configs=n_initial_configs
     )
     
     print(f"\n{'='*70}")
@@ -814,8 +828,12 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output"):
     print(f"{'='*70}")
     print(f"Trials a ejecutar: {n_trials}")
     print(f"Modelo surrogate: Random Forest (default de SMAC)")
-    print(f"Configuraciones iniciales: {min(3, n_trials)}")
+    print(f"Configuraciones iniciales: {n_initial_configs} (~{(n_initial_configs/n_trials)*100:.0f}% de trials)")
     print(f"Directorio de salida: {output_dir}")
+    print(f"\nNOTA: SMAC3 puede ejecutar trials adicionales debido a:")
+    print(f"      - Diseño inicial (warm-up del Random Forest)")
+    print(f"      - Validación de la configuración incumbente")
+    print(f"      - Configuraciones por defecto del framework")
     print(f"{'='*70}\n")
     
     # Crear facade SMAC
@@ -1253,7 +1271,7 @@ Ejemplo de uso:
                        help="Activar optimización de hiperparámetros con SMAC3",
                        action='store_true')
     parser.add_argument("--smac_trials",
-                       help="Número de trials para SMAC3 (recomendado: 10-20)",
+                       help="Número de trials para SMAC3 (recomendado: 10-20). NOTA: 20%% se usa para diseño inicial + SMAC puede ejecutar trials adicionales",
                        default=10,
                        type=int)
     parser.add_argument("--smac_output_dir",
