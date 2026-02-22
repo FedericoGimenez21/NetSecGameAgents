@@ -15,6 +15,9 @@ import json
 import os
 import tempfile
 import threading
+import time
+import socket as _socket
+import queue as stdlib_queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
 from pathlib import Path
@@ -47,23 +50,24 @@ class QTableOptimizationProblem(Problem):
                  actions_file="registration_info.json",
                  states_file="estadosSMALL.json",
                  n_workers=1,
-                 required_players=6):
+                 required_players=6,
+                 task_config_path=None):
         """
         Inicializa el problema de optimización de Q-table.
         
         Args:
             agent_script_path (str): Ruta al script q_agent_feature_based.py
             host (str): Host del servidor del juego
-            port (int): Puerto del servidor del juego
+            port (int): Puerto base. En modo multi-servidor se usan port, port+1, ...
             test_episodes (int): Número de episodios para evaluar cada Q-table
             reward_range (tuple): Rango de valores para los Q-values
             actions_file (str): Ruta al archivo registration_info.json con las acciones
             states_file (str): Ruta al archivo con los estados específicos
             n_workers (int): Número de workers paralelos para evaluar individuos
-            required_players (int): Jugadores requeridos por el servidor (netsecenv_conf.yaml).
-                                    Los individuos se evalúan en lotes de este tamaño para
-                                    garantizar que todos los agentes de un lote terminen antes
-                                    de iniciar el siguiente.
+            required_players (int): (Legado) Solo se usa cuando task_config_path=None.
+            task_config_path (str): Ruta al netsecenv_conf.yaml. Si se provee, el GA
+                                    gestiona automáticamente N instancias de NetSecGame
+                                    en puertos consecutivos (modo multi-servidor).
         """
         self.agent_script_path = agent_script_path
         self.host = host
@@ -74,6 +78,7 @@ class QTableOptimizationProblem(Problem):
         self.states_file = states_file
         self.n_workers = max(1, n_workers)
         self.required_players = max(1, required_players)
+        self.task_config_path = task_config_path
         self._print_lock = threading.Lock()
         
         # Cargar información de acciones y estados
@@ -104,7 +109,12 @@ class QTableOptimizationProblem(Problem):
         print(f"Problema inicializado con {self.n_states} estados y {self.n_actions} acciones")
         print(f"Tamaño de Q-table: {self.n_states} × {self.n_actions} = {self.q_table_size} valores")
         print(f"Workers paralelos para evaluación: {self.n_workers}")
-        print(f"Jugadores requeridos por el servidor (tamaño de lote): {self.required_players}")
+        if self.task_config_path:
+            print(f"Modo multi-servidor: {self.n_workers} instancia(s) de NetSecGame")
+            print(f"  Config: {self.task_config_path}")
+            print(f"  Puertos: {self.port} – {self.port + self.n_workers - 1}")
+        else:
+            print(f"Modo servidor externo (required_players={self.required_players})")
 
     # ----------------------------------------------------------------
     # Soporte de pickling: threading.Lock no es serializable, se omite
@@ -118,9 +128,10 @@ class QTableOptimizationProblem(Problem):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._print_lock = threading.Lock()
-        # Compatibilidad con instancias antiguas serializadas sin required_players
         if 'required_players' not in state:
             self.required_players = 6
+        if 'task_config_path' not in state:
+            self.task_config_path = None
 
     def _load_actions(self):
         """Carga las acciones desde registration_info.json y las convierte a objetos Action"""
@@ -227,8 +238,69 @@ class QTableOptimizationProblem(Problem):
         }
         
         return q_table_data
-    
-    def _evaluate_single(self, idx, x, total):
+
+    # ----------------------------------------------------------------
+    # Gestión de servidores NetSecGame (modo multi-servidor)
+    # ----------------------------------------------------------------
+
+    def _start_game_servers(self, n_servers):
+        """
+        Lanza n_servers instancias del coordinator NetSecGame en puertos
+        consecutivos comenzando desde self.port.
+
+        Returns:
+            dict: {port: subprocess.Popen}
+        """
+        server_procs = {}
+        for i in range(n_servers):
+            port = self.port + i
+            cmd = [
+                sys.executable, '-m', 'AIDojoCoordinator.worlds.NSEGameCoordinator',
+                f'--task_config={self.task_config_path}',
+                f'--game_port={port}',
+                f'--game_host={self.host}',
+            ]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            server_procs[port] = proc
+            with self._print_lock:
+                print(f"  [Servidor] Puerto {port} iniciado (PID {proc.pid})")
+        return server_procs
+
+    def _stop_game_servers(self, server_procs):
+        """Termina todas las instancias del coordinator lanzadas por este proceso."""
+        for port, proc in server_procs.items():
+            try:
+                proc.terminate()
+                proc.wait(timeout=15)
+                with self._print_lock:
+                    print(f"  [Servidor] Puerto {port} detenido.")
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def _wait_for_server(self, port, timeout=60):
+        """
+        Espera hasta que el servidor TCP en el puerto dado acepte conexiones.
+
+        Returns:
+            bool: True si respondió antes del timeout, False en caso contrario.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                with _socket.create_connection((self.host, port), timeout=1):
+                    return True
+            except (ConnectionRefusedError, OSError):
+                time.sleep(0.5)
+        return False
+
+    def _evaluate_single(self, idx, x, total, port=None):
         """
         Evalúa un único individuo de la población.
 
@@ -267,35 +339,80 @@ class QTableOptimizationProblem(Problem):
     def _evaluate(self, X, out, *args, **kwargs):
         """
         Evalúa la calidad de las Q-tables candidatas ejecutándolas en el agente.
-        
-        Para cada individuo:
-        1. Crea una Q-table desde sus parámetros
-        2. Guarda la Q-table en un archivo temporal
-        3. Ejecuta el agente en modo testing con esa Q-table
-        4. Extrae el fitness (win_rate, avg_return, etc.)
 
-        Cuando n_workers > 1, los individuos se evalúan en paralelo en **lotes**
-        de tamaño ``required_players`` (configurado en netsecenv_conf.yaml).
-        El servidor de juego requiere exactamente ese número de agentes conectados
-        simultáneamente para iniciar una partida; por lo tanto, todos los agentes
-        de un lote deben terminar antes de que se lancen los del lote siguiente.
-        Esto evita que un agente nuevo intente conectarse mientras la partida
-        anterior aún está en curso.
+        Modos de evaluación:
+
+        **Modo multi-servidor** (task_config_path provisto):
+          El GA lanza N instancias independientes de NetSecGame en puertos
+          consecutivos (port, port+1, ...). Los individuos se distribuyen sobre
+          un pool de puertos y se evalúan con paralelismo real sin batching.
+          Los servidores se inician al principio de cada generación y se detienen
+          al finalizar, incluso ante errores.
+
+        **Modo servidor externo** (task_config_path=None):
+          - n_workers=1: secuencial en self.port.
+          - n_workers>1: lotes de required_players (legado, para required_players>1).
         """
         total = len(X)
         objectives = [None] * total
 
-        if self.n_workers == 1:
-            # Evaluación secuencial
+        if self.task_config_path is not None:
+            # --------------------------------------------------------
+            # Modo multi-servidor
+            # --------------------------------------------------------
+            n_servers = min(self.n_workers, total)
+            port_pool = stdlib_queue.Queue()
+            for i in range(n_servers):
+                port_pool.put(self.port + i)
+
+            print(
+                f"\nIniciando {n_servers} instancia(s) de NetSecGame "
+                f"(puertos {self.port}–{self.port + n_servers - 1})..."
+            )
+            server_procs = self._start_game_servers(n_servers)
+
+            print("Esperando a que los servidores estén listos...")
+            for i in range(n_servers):
+                p = self.port + i
+                ok = self._wait_for_server(p)
+                with self._print_lock:
+                    status = "listo" if ok else "TIMEOUT (se continúa de todas formas)"
+                    print(f"  Puerto {p}: {status}")
+
+            try:
+                def _worker_with_port(idx):
+                    port = port_pool.get()
+                    try:
+                        return self._evaluate_single(idx, X[idx], total, port=port)
+                    finally:
+                        port_pool.put(port)
+
+                print(f"\nEvaluando {total} individuos con {n_servers} servidor(es) en paralelo...")
+                with ThreadPoolExecutor(max_workers=n_servers) as executor:
+                    futures = {
+                        executor.submit(_worker_with_port, idx): idx
+                        for idx in range(total)
+                    }
+                    for future in as_completed(futures):
+                        idx, fitness = future.result()
+                        objectives[idx] = fitness
+            finally:
+                print("\nDeteniendo instancias de NetSecGame...")
+                self._stop_game_servers(server_procs)
+
+        elif self.n_workers == 1:
+            # --------------------------------------------------------
+            # Servidor externo, evaluación secuencial
+            # --------------------------------------------------------
             for idx, x in enumerate(X):
                 _, fitness = self._evaluate_single(idx, x, total)
                 objectives[idx] = fitness
         else:
-            # Evaluación paralela en lotes de required_players.
-            # Cada lote se lanza completo y se espera a que TODOS sus workers
-            # terminen antes de iniciar el siguiente lote.
+            # --------------------------------------------------------
+            # Servidor externo, lotes de required_players (legado)
+            # --------------------------------------------------------
             batch_size = min(self.n_workers, self.required_players)
-            n_batches = (total + batch_size - 1) // batch_size  # ceil
+            n_batches = (total + batch_size - 1) // batch_size
             print(
                 f"\nEvaluando {total} individuos en {n_batches} lote(s) "
                 f"de hasta {batch_size} workers "
@@ -309,8 +426,6 @@ class QTableOptimizationProblem(Problem):
                     f"  Lote {batch_num + 1}/{n_batches}: "
                     f"individuos {batch_start + 1}–{batch_end} de {total}"
                 )
-                # Lanzar todos los workers del lote simultáneamente y esperar
-                # a que TODOS terminen (shutdown(wait=True) es el default).
                 with ThreadPoolExecutor(max_workers=len(batch_indices)) as executor:
                     futures = {
                         executor.submit(self._evaluate_single, idx, X[idx], total): idx
@@ -323,22 +438,24 @@ class QTableOptimizationProblem(Problem):
 
         out["F"] = np.array(objectives)
     
-    def _run_agent_evaluation(self, q_table_path):
+    def _run_agent_evaluation(self, q_table_path, port=None):
         """
         Ejecuta el agente con la Q-table proporcionada y extrae el fitness.
         
         Args:
             q_table_path (str): Ruta al archivo pickle con la Q-table
+            port (int): Puerto del servidor a usar. None usa self.port.
             
         Returns:
             float: Fitness (menor es mejor). Usamos: -win_rate - avg_return/100
         """
+        effective_port = port if port is not None else self.port
         # Comando para ejecutar el agente en modo testing
         cmd = [
             sys.executable,  # Python interpreter
             self.agent_script_path,
             "--host", self.host,
-            "--port", str(self.port),
+            "--port", str(effective_port),
             "--episodes", str(self.test_episodes),
             "--testing", "True",
             "--previous_model", q_table_path,
@@ -417,21 +534,23 @@ class QTableGeneticOptimizer:
                  actions_file="registration_info.json",
                  states_file="estadosSMALL.json",
                  n_workers=1,
-                 required_players=6):
+                 required_players=6,
+                 task_config_path=None):
         """
         Inicializa el optimizador.
         
         Args:
             agent_script_path (str): Ruta al script q_agent_feature_based.py
             host (str): Host del servidor del juego
-            port (int): Puerto del servidor del juego
+            port (int): Puerto base. En modo multi-servidor se usan port, port+1, ...
             test_episodes (int): Número de episodios para evaluar cada Q-table
             reward_range (tuple): Rango de valores para la Q-table
             actions_file (str): Ruta al archivo con las acciones registradas
             states_file (str): Ruta al archivo con los estados específicos
             n_workers (int): Número de workers paralelos para evaluar individuos
-            required_players (int): Jugadores requeridos por el servidor (netsecenv_conf.yaml).
-                                    Controla el tamaño de lote en la evaluación paralela.
+            required_players (int): (Legado) Solo se usa cuando task_config_path=None.
+            task_config_path (str): Ruta al netsecenv_conf.yaml. Si se provee, el GA
+                                    gestiona sus propias instancias de NetSecGame.
         """
         self.agent_script_path = agent_script_path
         self.host = host
@@ -442,6 +561,7 @@ class QTableGeneticOptimizer:
         self.states_file = states_file
         self.n_workers = n_workers
         self.required_players = required_players
+        self.task_config_path = task_config_path
         
         # Crear el problema de optimización
         self.problem = QTableOptimizationProblem(
@@ -453,7 +573,8 @@ class QTableGeneticOptimizer:
             actions_file=actions_file,
             states_file=states_file,
             n_workers=n_workers,
-            required_players=required_players
+            required_players=required_players,
+            task_config_path=task_config_path
         )
         
         self.best_q_table = None
@@ -716,6 +837,7 @@ class SMACGAObjective:
         self.results_history = []
         self.n_workers = base_config.get('n_workers', 1)
         self.required_players = base_config.get('required_players', 6)
+        self.task_config_path = base_config.get('task_config_path', None)
     
     @property
     def configspace(self) -> ConfigurationSpace:
@@ -802,7 +924,8 @@ class SMACGAObjective:
                 actions_file=self.base_config['actions_file'],
                 states_file=self.base_config['states_file'],
                 n_workers=self.n_workers,
-                required_players=self.required_players
+                required_players=self.required_players,
+                task_config_path=self.task_config_path
             )
             
             # Ejecutar optimización GA
@@ -1373,12 +1496,18 @@ Ejemplo de uso:
                        default=1,
                        type=int)
     parser.add_argument("--required_players",
-                       help="Jugadores requeridos por el servidor (required_players en netsecenv_conf.yaml). "
-                            "En modo paralelo, los individuos se evalúan en lotes de este tamaño: "
-                            "todos los agentes del lote deben terminar antes de iniciar el siguiente. "
-                            "Por defecto 6 (valor del archivo de configuración).",
-                       default=6,
+                       help="(Legado) Jugadores requeridos por el servidor. Solo se usa cuando "
+                            "--task_config no se proporciona. Por defecto 1.",
+                       default=1,
                        type=int)
+    parser.add_argument("--task_config",
+                       help="Ruta al netsecenv_conf.yaml. Si se provee, el GA gestiona "
+                            "automáticamente N instancias de NetSecGame en puertos consecutivos "
+                            "(modo multi-servidor). Cada worker tiene su propio servidor, "
+                            "permitiendo paralelismo real sin batching ni esperas. "
+                            "Ejemplo: --task_config ./AIDojoCoordinator/netsecenv_conf.yaml",
+                       default=None,
+                       type=str)
     
     args = parser.parse_args()
     
@@ -1420,6 +1549,7 @@ Ejemplo de uso:
             'states_file': args.states,
             'n_workers': args.workers,
             'required_players': args.required_players,
+            'task_config_path': args.task_config,
         }
         
         # Ejecutar optimización con SMAC3
@@ -1444,12 +1574,13 @@ Ejemplo de uso:
                 agent_script_path=args.agent_script,
                 host=args.host,
                 port=args.port,
-                test_episodes=25,  # test_episodes fijo
+                test_episodes=25,
                 reward_range=(-1, 1),
                 actions_file=args.actions,
                 states_file=args.states,
                 n_workers=args.workers,
-                required_players=args.required_players
+                required_players=args.required_players,
+                task_config_path=args.task_config
             )
             
             # Ejecutar optimización final
@@ -1500,7 +1631,8 @@ Ejemplo de uso:
             actions_file=args.actions,
             states_file=args.states,
             n_workers=args.workers,
-            required_players=args.required_players
+            required_players=args.required_players,
+            task_config_path=args.task_config
         )
         
         # Ejecutar optimización
