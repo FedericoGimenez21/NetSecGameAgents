@@ -321,7 +321,7 @@ class QTableOptimizationProblem(Problem):
             q_table_path = tmp_file.name
             pickle.dump(q_table_data, tmp_file)
             tmp_file.close()
-            fitness = self._run_agent_evaluation(q_table_path)
+            fitness = self._run_agent_evaluation(q_table_path, port=port)
             with self._print_lock:
                 print(f"  Individuo {idx + 1}/{total} -> Fitness: {fitness:.4f}")
             return idx, fitness
