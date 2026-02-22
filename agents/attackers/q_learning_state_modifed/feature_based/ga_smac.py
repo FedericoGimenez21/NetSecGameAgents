@@ -98,7 +98,20 @@ class QTableOptimizationProblem(Problem):
         print(f"Problema inicializado con {self.n_states} estados y {self.n_actions} acciones")
         print(f"Tamaño de Q-table: {self.n_states} × {self.n_actions} = {self.q_table_size} valores")
         print(f"Workers paralelos para evaluación: {self.n_workers}")
-    
+
+    # ----------------------------------------------------------------
+    # Soporte de pickling: threading.Lock no es serializable, se omite
+    # en __getstate__ y se recrea en __setstate__.
+    # ----------------------------------------------------------------
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('_print_lock', None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._print_lock = threading.Lock()
+
     def _load_actions(self):
         """Carga las acciones desde registration_info.json y las convierte a objetos Action"""
         try:
