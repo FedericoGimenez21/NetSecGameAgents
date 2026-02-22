@@ -46,7 +46,8 @@ class QTableOptimizationProblem(Problem):
                  reward_range=(-1, 1),
                  actions_file="registration_info.json",
                  states_file="estadosSMALL.json",
-                 n_workers=1):
+                 n_workers=1,
+                 required_players=6):
         """
         Inicializa el problema de optimización de Q-table.
         
@@ -59,6 +60,10 @@ class QTableOptimizationProblem(Problem):
             actions_file (str): Ruta al archivo registration_info.json con las acciones
             states_file (str): Ruta al archivo con los estados específicos
             n_workers (int): Número de workers paralelos para evaluar individuos
+            required_players (int): Jugadores requeridos por el servidor (netsecenv_conf.yaml).
+                                    Los individuos se evalúan en lotes de este tamaño para
+                                    garantizar que todos los agentes de un lote terminen antes
+                                    de iniciar el siguiente.
         """
         self.agent_script_path = agent_script_path
         self.host = host
@@ -68,6 +73,7 @@ class QTableOptimizationProblem(Problem):
         self.actions_file = actions_file
         self.states_file = states_file
         self.n_workers = max(1, n_workers)
+        self.required_players = max(1, required_players)
         self._print_lock = threading.Lock()
         
         # Cargar información de acciones y estados
@@ -98,6 +104,7 @@ class QTableOptimizationProblem(Problem):
         print(f"Problema inicializado con {self.n_states} estados y {self.n_actions} acciones")
         print(f"Tamaño de Q-table: {self.n_states} × {self.n_actions} = {self.q_table_size} valores")
         print(f"Workers paralelos para evaluación: {self.n_workers}")
+        print(f"Jugadores requeridos por el servidor (tamaño de lote): {self.required_players}")
 
     # ----------------------------------------------------------------
     # Soporte de pickling: threading.Lock no es serializable, se omite
@@ -111,6 +118,9 @@ class QTableOptimizationProblem(Problem):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._print_lock = threading.Lock()
+        # Compatibilidad con instancias antiguas serializadas sin required_players
+        if 'required_players' not in state:
+            self.required_players = 6
 
     def _load_actions(self):
         """Carga las acciones desde registration_info.json y las convierte a objetos Action"""
@@ -264,8 +274,13 @@ class QTableOptimizationProblem(Problem):
         3. Ejecuta el agente en modo testing con esa Q-table
         4. Extrae el fitness (win_rate, avg_return, etc.)
 
-        Cuando n_workers > 1, los individuos se evalúan en paralelo usando
-        ThreadPoolExecutor (apropiado ya que cada evaluación lanza un subprocess).
+        Cuando n_workers > 1, los individuos se evalúan en paralelo en **lotes**
+        de tamaño ``required_players`` (configurado en netsecenv_conf.yaml).
+        El servidor de juego requiere exactamente ese número de agentes conectados
+        simultáneamente para iniciar una partida; por lo tanto, todos los agentes
+        de un lote deben terminar antes de que se lancen los del lote siguiente.
+        Esto evita que un agente nuevo intente conectarse mientras la partida
+        anterior aún está en curso.
         """
         total = len(X)
         objectives = [None] * total
@@ -276,17 +291,35 @@ class QTableOptimizationProblem(Problem):
                 _, fitness = self._evaluate_single(idx, x, total)
                 objectives[idx] = fitness
         else:
-            # Evaluación paralela con ThreadPoolExecutor
-            effective_workers = min(self.n_workers, total)
-            print(f"\nEvaluando {total} individuos con {effective_workers} workers paralelos...")
-            with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-                futures = {
-                    executor.submit(self._evaluate_single, idx, x, total): idx
-                    for idx, x in enumerate(X)
-                }
-                for future in as_completed(futures):
-                    idx, fitness = future.result()
-                    objectives[idx] = fitness
+            # Evaluación paralela en lotes de required_players.
+            # Cada lote se lanza completo y se espera a que TODOS sus workers
+            # terminen antes de iniciar el siguiente lote.
+            batch_size = min(self.n_workers, self.required_players)
+            n_batches = (total + batch_size - 1) // batch_size  # ceil
+            print(
+                f"\nEvaluando {total} individuos en {n_batches} lote(s) "
+                f"de hasta {batch_size} workers "
+                f"(required_players={self.required_players})..."
+            )
+            for batch_num in range(n_batches):
+                batch_start = batch_num * batch_size
+                batch_end = min(batch_start + batch_size, total)
+                batch_indices = list(range(batch_start, batch_end))
+                print(
+                    f"  Lote {batch_num + 1}/{n_batches}: "
+                    f"individuos {batch_start + 1}–{batch_end} de {total}"
+                )
+                # Lanzar todos los workers del lote simultáneamente y esperar
+                # a que TODOS terminen (shutdown(wait=True) es el default).
+                with ThreadPoolExecutor(max_workers=len(batch_indices)) as executor:
+                    futures = {
+                        executor.submit(self._evaluate_single, idx, X[idx], total): idx
+                        for idx in batch_indices
+                    }
+                    for future in as_completed(futures):
+                        idx, fitness = future.result()
+                        objectives[idx] = fitness
+                print(f"  Lote {batch_num + 1}/{n_batches} completado.")
 
         out["F"] = np.array(objectives)
     
@@ -383,7 +416,8 @@ class QTableGeneticOptimizer:
                  reward_range=(-1, 1),
                  actions_file="registration_info.json",
                  states_file="estadosSMALL.json",
-                 n_workers=1):
+                 n_workers=1,
+                 required_players=6):
         """
         Inicializa el optimizador.
         
@@ -396,6 +430,8 @@ class QTableGeneticOptimizer:
             actions_file (str): Ruta al archivo con las acciones registradas
             states_file (str): Ruta al archivo con los estados específicos
             n_workers (int): Número de workers paralelos para evaluar individuos
+            required_players (int): Jugadores requeridos por el servidor (netsecenv_conf.yaml).
+                                    Controla el tamaño de lote en la evaluación paralela.
         """
         self.agent_script_path = agent_script_path
         self.host = host
@@ -405,6 +441,7 @@ class QTableGeneticOptimizer:
         self.actions_file = actions_file
         self.states_file = states_file
         self.n_workers = n_workers
+        self.required_players = required_players
         
         # Crear el problema de optimización
         self.problem = QTableOptimizationProblem(
@@ -415,7 +452,8 @@ class QTableGeneticOptimizer:
             reward_range=reward_range,
             actions_file=actions_file,
             states_file=states_file,
-            n_workers=n_workers
+            n_workers=n_workers,
+            required_players=required_players
         )
         
         self.best_q_table = None
@@ -677,6 +715,7 @@ class SMACGAObjective:
         self.best_trial = -1
         self.results_history = []
         self.n_workers = base_config.get('n_workers', 1)
+        self.required_players = base_config.get('required_players', 6)
     
     @property
     def configspace(self) -> ConfigurationSpace:
@@ -762,7 +801,8 @@ class SMACGAObjective:
                 reward_range=reward_range,
                 actions_file=self.base_config['actions_file'],
                 states_file=self.base_config['states_file'],
-                n_workers=self.n_workers
+                n_workers=self.n_workers,
+                required_players=self.required_players
             )
             
             # Ejecutar optimización GA
@@ -1332,6 +1372,13 @@ Ejemplo de uso:
                             f"Por defecto 1 (secuencial). Máximo recomendado: {multiprocessing.cpu_count()}.",
                        default=1,
                        type=int)
+    parser.add_argument("--required_players",
+                       help="Jugadores requeridos por el servidor (required_players en netsecenv_conf.yaml). "
+                            "En modo paralelo, los individuos se evalúan en lotes de este tamaño: "
+                            "todos los agentes del lote deben terminar antes de iniciar el siguiente. "
+                            "Por defecto 6 (valor del archivo de configuración).",
+                       default=6,
+                       type=int)
     
     args = parser.parse_args()
     
@@ -1372,6 +1419,7 @@ Ejemplo de uso:
             'actions_file': args.actions,
             'states_file': args.states,
             'n_workers': args.workers,
+            'required_players': args.required_players,
         }
         
         # Ejecutar optimización con SMAC3
@@ -1400,7 +1448,8 @@ Ejemplo de uso:
                 reward_range=(-1, 1),
                 actions_file=args.actions,
                 states_file=args.states,
-                n_workers=args.workers
+                n_workers=args.workers,
+                required_players=args.required_players
             )
             
             # Ejecutar optimización final
@@ -1450,7 +1499,8 @@ Ejemplo de uso:
             reward_range=reward_range,
             actions_file=args.actions,
             states_file=args.states,
-            n_workers=args.workers
+            n_workers=args.workers,
+            required_players=args.required_players
         )
         
         # Ejecutar optimización
