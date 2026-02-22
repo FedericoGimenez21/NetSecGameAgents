@@ -14,6 +14,9 @@ import sys
 import json
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
 from pathlib import Path
 from ConfigSpace import ConfigurationSpace, Configuration, Float, Integer
 from smac import HyperparameterOptimizationFacade, Scenario
@@ -42,7 +45,8 @@ class QTableOptimizationProblem(Problem):
                  test_episodes=10,
                  reward_range=(-1, 1),
                  actions_file="registration_info.json",
-                 states_file="estadosSMALL.json"):
+                 states_file="estadosSMALL.json",
+                 n_workers=1):
         """
         Inicializa el problema de optimización de Q-table.
         
@@ -54,6 +58,7 @@ class QTableOptimizationProblem(Problem):
             reward_range (tuple): Rango de valores para los Q-values
             actions_file (str): Ruta al archivo registration_info.json con las acciones
             states_file (str): Ruta al archivo con los estados específicos
+            n_workers (int): Número de workers paralelos para evaluar individuos
         """
         self.agent_script_path = agent_script_path
         self.host = host
@@ -62,6 +67,8 @@ class QTableOptimizationProblem(Problem):
         self.reward_range = reward_range
         self.actions_file = actions_file
         self.states_file = states_file
+        self.n_workers = max(1, n_workers)
+        self._print_lock = threading.Lock()
         
         # Cargar información de acciones y estados
         self.actions = self._load_actions()
@@ -90,6 +97,7 @@ class QTableOptimizationProblem(Problem):
         
         print(f"Problema inicializado con {self.n_states} estados y {self.n_actions} acciones")
         print(f"Tamaño de Q-table: {self.n_states} × {self.n_actions} = {self.q_table_size} valores")
+        print(f"Workers paralelos para evaluación: {self.n_workers}")
     
     def _load_actions(self):
         """Carga las acciones desde registration_info.json y las convierte a objetos Action"""
@@ -197,6 +205,42 @@ class QTableOptimizationProblem(Problem):
         
         return q_table_data
     
+    def _evaluate_single(self, idx, x, total):
+        """
+        Evalúa un único individuo de la población.
+
+        Args:
+            idx (int): Índice del individuo
+            x (np.ndarray): Parámetros del individuo
+            total (int): Tamaño total de la población (para logging)
+
+        Returns:
+            tuple: (idx, fitness)
+        """
+        with self._print_lock:
+            print(f"\nEvaluando individuo {idx + 1}/{total}...")
+        q_table_path = None
+        try:
+            q_table_data = self._create_q_table_from_params(x)
+            tmp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pickle', delete=False)
+            q_table_path = tmp_file.name
+            pickle.dump(q_table_data, tmp_file)
+            tmp_file.close()
+            fitness = self._run_agent_evaluation(q_table_path)
+            with self._print_lock:
+                print(f"  Individuo {idx + 1}/{total} -> Fitness: {fitness:.4f}")
+            return idx, fitness
+        except Exception as e:
+            with self._print_lock:
+                print(f"  Error evaluando individuo {idx + 1}: {e}")
+            return idx, 1000.0
+        finally:
+            if q_table_path and os.path.exists(q_table_path):
+                try:
+                    os.remove(q_table_path)
+                except Exception:
+                    pass
+
     def _evaluate(self, X, out, *args, **kwargs):
         """
         Evalúa la calidad de las Q-tables candidatas ejecutándolas en el agente.
@@ -206,54 +250,31 @@ class QTableOptimizationProblem(Problem):
         2. Guarda la Q-table en un archivo temporal
         3. Ejecuta el agente en modo testing con esa Q-table
         4. Extrae el fitness (win_rate, avg_return, etc.)
+
+        Cuando n_workers > 1, los individuos se evalúan en paralelo usando
+        ThreadPoolExecutor (apropiado ya que cada evaluación lanza un subprocess).
         """
-        objectives = []
-        temp_files_created = []  # Mantener registro de archivos temporales
-        
-        for idx, x in enumerate(X):
-            print(f"\nEvaluando individuo {idx + 1}/{len(X)}...")
-            q_table_path = None
-            
-            try:
-                # Crear Q-table desde parámetros
-                q_table_data = self._create_q_table_from_params(x)
-                
-                # Crear archivo temporal sin delete=False para control manual
-                tmp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pickle', delete=False)
-                q_table_path = tmp_file.name
-                temp_files_created.append(q_table_path)
-                
-                # Guardar Q-table y cerrar el archivo
-                pickle.dump(q_table_data, tmp_file)
-                tmp_file.close()
-                
-                # Ejecutar agente en modo testing
-                fitness = self._run_agent_evaluation(q_table_path)
-                objectives.append(fitness)
-                print(f"  Fitness: {fitness:.4f}")
-                
-            except Exception as e:
-                print(f"  Error evaluando individuo: {e}")
-                # Penalización máxima en caso de error
-                objectives.append(1000.0)
-            
-            finally:
-                # Eliminar el archivo temporal INMEDIATAMENTE después de evaluar
-                if q_table_path and os.path.exists(q_table_path):
-                    try:
-                        os.remove(q_table_path)
-                        print(f"Temporal eliminado: {os.path.basename(q_table_path)}")
-                    except Exception as e:
-                        print(f"No se pudo eliminar {q_table_path}: {e}")
-        # Limpieza adicional: asegurar que todos los archivos temporales fueron eliminados
-        for temp_file in temp_files_created:
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                    print(f"Limpieza final: {os.path.basename(temp_file)} eliminado")
-                except:
-                    pass
-        
+        total = len(X)
+        objectives = [None] * total
+
+        if self.n_workers == 1:
+            # Evaluación secuencial
+            for idx, x in enumerate(X):
+                _, fitness = self._evaluate_single(idx, x, total)
+                objectives[idx] = fitness
+        else:
+            # Evaluación paralela con ThreadPoolExecutor
+            effective_workers = min(self.n_workers, total)
+            print(f"\nEvaluando {total} individuos con {effective_workers} workers paralelos...")
+            with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+                futures = {
+                    executor.submit(self._evaluate_single, idx, x, total): idx
+                    for idx, x in enumerate(X)
+                }
+                for future in as_completed(futures):
+                    idx, fitness = future.result()
+                    objectives[idx] = fitness
+
         out["F"] = np.array(objectives)
     
     def _run_agent_evaluation(self, q_table_path):
@@ -348,7 +369,8 @@ class QTableGeneticOptimizer:
                  test_episodes=10,
                  reward_range=(-1, 1),
                  actions_file="registration_info.json",
-                 states_file="estadosSMALL.json"):
+                 states_file="estadosSMALL.json",
+                 n_workers=1):
         """
         Inicializa el optimizador.
         
@@ -360,6 +382,7 @@ class QTableGeneticOptimizer:
             reward_range (tuple): Rango de valores para la Q-table
             actions_file (str): Ruta al archivo con las acciones registradas
             states_file (str): Ruta al archivo con los estados específicos
+            n_workers (int): Número de workers paralelos para evaluar individuos
         """
         self.agent_script_path = agent_script_path
         self.host = host
@@ -368,6 +391,7 @@ class QTableGeneticOptimizer:
         self.reward_range = reward_range
         self.actions_file = actions_file
         self.states_file = states_file
+        self.n_workers = n_workers
         
         # Crear el problema de optimización
         self.problem = QTableOptimizationProblem(
@@ -377,7 +401,8 @@ class QTableGeneticOptimizer:
             test_episodes=test_episodes,
             reward_range=reward_range,
             actions_file=actions_file,
-            states_file=states_file
+            states_file=states_file,
+            n_workers=n_workers
         )
         
         self.best_q_table = None
@@ -425,6 +450,7 @@ class QTableGeneticOptimizer:
         print(f"Rango de Q-values: {self.reward_range}")
         print(f"SBX prob: {sbx_prob}, eta: {sbx_eta}, prob_var: {sbx_prob_var} (fijo)")
         print(f"PM prob: {pm_prob} (fijo), prob_var: {pm_prob_var}, eta: {pm_eta}")
+        print(f"Workers paralelos: {self.n_workers}")
 
         print("="*70 + "\n")
         
@@ -630,12 +656,14 @@ class SMACGAObjective:
         Args:
             base_config (dict): Configuración base con parámetros fijos
                 - agent_script_path, host, port, actions_file, states_file
+                - n_workers (opcional): número de workers paralelos
         """
         self.base_config = base_config
         self.trial_count = 0
         self.best_win_rate = 0.0
         self.best_trial = -1
         self.results_history = []
+        self.n_workers = base_config.get('n_workers', 1)
     
     @property
     def configspace(self) -> ConfigurationSpace:
@@ -720,7 +748,8 @@ class SMACGAObjective:
                 test_episodes=test_episodes,
                 reward_range=reward_range,
                 actions_file=self.base_config['actions_file'],
-                states_file=self.base_config['states_file']
+                states_file=self.base_config['states_file'],
+                n_workers=self.n_workers
             )
             
             # Ejecutar optimización GA
@@ -771,7 +800,7 @@ class SMACGAObjective:
             return 1.0  # Penalización máxima (win_rate = 0%)
 
 
-def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output"):
+def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_workers=1):
     """
     Ejecuta optimización de hiperparámetros con SMAC3.
     
@@ -802,6 +831,9 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output"):
     log_file, logger = setup_smac_logging()
     print(f"SMAC logs guardados en: {log_file}\n")
     
+    # Inyectar n_workers en la configuración base si no está presente
+    base_config = {**base_config, 'n_workers': n_workers}
+
     # Crear instancia del objetivo
     objective = SMACGAObjective(base_config)
     
@@ -1281,6 +1313,12 @@ Ejemplo de uso:
     parser.add_argument("--skip_final_training",
                        help="Omitir el entrenamiento final con mejores hiperparámetros (solo en modo SMAC)",
                        action='store_true')
+    parser.add_argument("--workers",
+                       help="Número de workers paralelos para evaluar individuos de la población. "
+                            "Cada worker lanza un subprocess del agente. "
+                            f"Por defecto 1 (secuencial). Máximo recomendado: {multiprocessing.cpu_count()}.",
+                       default=1,
+                       type=int)
     
     args = parser.parse_args()
     
@@ -1319,14 +1357,16 @@ Ejemplo de uso:
             'host': args.host,
             'port': args.port,
             'actions_file': args.actions,
-            'states_file': args.states
+            'states_file': args.states,
+            'n_workers': args.workers,
         }
         
         # Ejecutar optimización con SMAC3
         incumbent, objective, smac_instance = optimize_with_smac(
             base_config=base_config,
             n_trials=args.smac_trials,
-            output_dir=args.smac_output_dir
+            output_dir=args.smac_output_dir,
+            n_workers=args.workers
         )
         
         # Generar visualizaciones
@@ -1346,7 +1386,8 @@ Ejemplo de uso:
                 test_episodes=25,  # test_episodes fijo
                 reward_range=(-1, 1),
                 actions_file=args.actions,
-                states_file=args.states
+                states_file=args.states,
+                n_workers=args.workers
             )
             
             # Ejecutar optimización final
@@ -1395,7 +1436,8 @@ Ejemplo de uso:
             test_episodes=args.test_episodes,
             reward_range=reward_range,
             actions_file=args.actions,
-            states_file=args.states
+            states_file=args.states,
+            n_workers=args.workers
         )
         
         # Ejecutar optimización
