@@ -80,6 +80,8 @@ class QTableOptimizationProblem(Problem):
         self.required_players = max(1, required_players)
         self.task_config_path = task_config_path
         self._print_lock = threading.Lock()
+        self._server_procs = None   # Servidores persistentes (ciclo de vida externo)
+        self._port_pool = None      # Pool de puertos para workers
         
         # Cargar información de acciones y estados
         self.actions = self._load_actions()
@@ -123,11 +125,15 @@ class QTableOptimizationProblem(Problem):
     def __getstate__(self):
         state = self.__dict__.copy()
         state.pop('_print_lock', None)
+        state.pop('_server_procs', None)
+        state.pop('_port_pool', None)
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._print_lock = threading.Lock()
+        self._server_procs = None
+        self._port_pool = None
         if 'required_players' not in state:
             self.required_players = 6
         if 'task_config_path' not in state:
@@ -300,6 +306,39 @@ class QTableOptimizationProblem(Problem):
                 time.sleep(0.5)
         return False
 
+    def start_servers(self):
+        """
+        Inicia los servidores NetSecGame una sola vez y prepara el pool de puertos.
+        Debe llamarse antes de iniciar la optimización. Los servidores permanecen
+        activos hasta que se llame a stop_servers().
+        """
+        if self.task_config_path is None:
+            return
+        n_servers = self.n_workers
+        self._port_pool = stdlib_queue.Queue()
+        for i in range(n_servers):
+            self._port_pool.put(self.port + i)
+        print(
+            f"\nIniciando {n_servers} instancia(s) de NetSecGame "
+            f"(puertos {self.port}\u2013{self.port + n_servers - 1})..."
+        )
+        self._server_procs = self._start_game_servers(n_servers)
+        print("Esperando a que los servidores estén listos...")
+        for i in range(n_servers):
+            p = self.port + i
+            ok = self._wait_for_server(p)
+            status = "listo" if ok else "TIMEOUT (se continúa de todas formas)"
+            print(f"  Puerto {p}: {status}")
+        print("Servidores listos. Se reutilizarán en todas las generaciones.\n")
+
+    def stop_servers(self):
+        """Detiene todos los servidores iniciados con start_servers()."""
+        if self._server_procs:
+            print("\nDeteniendo instancias de NetSecGame...")
+            self._stop_game_servers(self._server_procs)
+            self._server_procs = None
+            self._port_pool = None
+
     def _evaluate_single(self, idx, x, total, port=None):
         """
         Evalúa un único individuo de la población.
@@ -358,47 +397,29 @@ class QTableOptimizationProblem(Problem):
 
         if self.task_config_path is not None:
             # --------------------------------------------------------
-            # Modo multi-servidor
+            # Modo multi-servidor: usa los servidores ya iniciados por
+            # QTableGeneticOptimizer.optimize() via start_servers().
+            # El ciclo de vida (inicio/parada) es externo a _evaluate.
             # --------------------------------------------------------
-            n_servers = min(self.n_workers, total)
-            port_pool = stdlib_queue.Queue()
-            for i in range(n_servers):
-                port_pool.put(self.port + i)
+            port_pool = self._port_pool
+            n_servers = len(self._server_procs) if self._server_procs else self.n_workers
 
-            print(
-                f"\nIniciando {n_servers} instancia(s) de NetSecGame "
-                f"(puertos {self.port}–{self.port + n_servers - 1})..."
-            )
-            server_procs = self._start_game_servers(n_servers)
+            def _worker_with_port(idx):
+                port = port_pool.get()
+                try:
+                    return self._evaluate_single(idx, X[idx], total, port=port)
+                finally:
+                    port_pool.put(port)
 
-            print("Esperando a que los servidores estén listos...")
-            for i in range(n_servers):
-                p = self.port + i
-                ok = self._wait_for_server(p)
-                with self._print_lock:
-                    status = "listo" if ok else "TIMEOUT (se continúa de todas formas)"
-                    print(f"  Puerto {p}: {status}")
-
-            try:
-                def _worker_with_port(idx):
-                    port = port_pool.get()
-                    try:
-                        return self._evaluate_single(idx, X[idx], total, port=port)
-                    finally:
-                        port_pool.put(port)
-
-                print(f"\nEvaluando {total} individuos con {n_servers} servidor(es) en paralelo...")
-                with ThreadPoolExecutor(max_workers=n_servers) as executor:
-                    futures = {
-                        executor.submit(_worker_with_port, idx): idx
-                        for idx in range(total)
-                    }
-                    for future in as_completed(futures):
-                        idx, fitness = future.result()
-                        objectives[idx] = fitness
-            finally:
-                print("\nDeteniendo instancias de NetSecGame...")
-                self._stop_game_servers(server_procs)
+            print(f"\nEvaluando {total} individuos con {n_servers} servidor(es) en paralelo...")
+            with ThreadPoolExecutor(max_workers=n_servers) as executor:
+                futures = {
+                    executor.submit(_worker_with_port, idx): idx
+                    for idx in range(total)
+                }
+                for future in as_completed(futures):
+                    idx, fitness = future.result()
+                    objectives[idx] = fitness
 
         elif self.n_workers == 1:
             # --------------------------------------------------------
@@ -640,13 +661,17 @@ class QTableGeneticOptimizer:
         
         # Ejecutar optimización
         print("Iniciando evolución...\n")
-        res = minimize(
-            self.problem,
-            algorithm,
-            termination,
-            verbose=verbose,
-            save_history=True
-        )
+        self.problem.start_servers()
+        try:
+            res = minimize(
+                self.problem,
+                algorithm,
+                termination,
+                verbose=verbose,
+                save_history=True
+            )
+        finally:
+            self.problem.stop_servers()
         
         # Guardar el mejor resultado
         self.best_params = res.X
