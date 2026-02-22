@@ -272,7 +272,11 @@ class QTableOptimizationProblemMulti(Problem):
             # Convertir diccionarios a objetos Action
             actions = []
             for action_dict in actions_dicts:
-                action_type = ActionType[action_dict["type"]]
+                # Key is "action_type" with value like "ActionType.ExfiltrateData"
+                raw_type = action_dict["action_type"]
+                # Strip the "ActionType." prefix if present
+                type_name = raw_type.split(".")[-1]
+                action_type = ActionType[type_name]
                 params = self._make_params_hashable(action_dict["parameters"])
                 action = Action(
                     action_type=action_type,
