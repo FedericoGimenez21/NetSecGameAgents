@@ -1336,69 +1336,124 @@ def plot_smac_results(objective, save_dir="smac_plots"):
         plt.close()
     
     # ================================================================
-    # 8. Box plots de win_rate por rangos de hiperparámetros
+    # 8. Box plots de win_rate por rangos de hiperparámetros (un archivo por param)
     # ================================================================
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    axes = axes.flatten()
-    
-    for idx, param in enumerate(hyperparams):
-        ax = axes[idx]
-        param_values = [r['config'].get(param, 0) for r in objective.results_history]
-        
-        # Dividir en cuartiles
+    n_trials_total = len(objective.results_history)
+    from matplotlib.lines import Line2D
+
+    # Número de bins adaptativo según cantidad de trials
+    if n_trials_total < 20:
+        n_bins = 4
+    elif n_trials_total < 50:
+        n_bins = 5
+    elif n_trials_total < 100:
+        n_bins = 6
+    else:
+        n_bins = 8
+
+    use_notch  = (n_trials_total >= 40)
+    show_points = (n_trials_total <= 200)
+
+    plot_paths_boxplots = []
+
+    for param in hyperparams:
+        param_values  = np.array([r['config'].get(param, 0) for r in objective.results_history])
+        win_rates_arr = np.array(win_rates)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
         if len(set(param_values)) > 1:
-            q1 = np.percentile(param_values, 25)
-            q2 = np.percentile(param_values, 50)
-            q3 = np.percentile(param_values, 75)
-            
-            # Agrupar win_rates por cuartil
-            groups = {f'Q1\n<{q1:.2f}': [], f'Q2\n{q1:.2f}-{q2:.2f}': [], 
-                     f'Q3\n{q2:.2f}-{q3:.2f}': [], f'Q4\n>{q3:.2f}': []}
-            
-            for r in objective.results_history:
-                val = r['config'].get(param, 0)
-                wr = r['win_rate']
-                if val <= q1:
-                    groups[f'Q1\n<{q1:.2f}'].append(wr)
-                elif val <= q2:
-                    groups[f'Q2\n{q1:.2f}-{q2:.2f}'].append(wr)
-                elif val <= q3:
-                    groups[f'Q3\n{q2:.2f}-{q3:.2f}'].append(wr)
-                else:
-                    groups[f'Q4\n>{q3:.2f}'].append(wr)
-            
-            # Crear box plot
-            data_to_plot = [v for v in groups.values() if v]
-            labels_to_plot = [k for k, v in groups.items() if v]
-            
-            bp = ax.boxplot(data_to_plot, labels=labels_to_plot, patch_artist=True)
-            
-            # Colorear cajas
-            colors = ['lightblue', 'lightgreen', 'lightyellow', 'lightcoral']
-            for patch, color in zip(bp['boxes'], colors[:len(bp['boxes'])]):
-                patch.set_facecolor(color)
-        
-        ax.set_title(hyperparam_labels[param], fontsize=11, fontweight='bold')
-        ax.set_ylabel('Win Rate (%)')
+            # Bins por percentiles equiespaciados → cada bin ≈ mismo nº de trials
+            percentile_edges = np.linspace(0, 100, n_bins + 1)
+            bin_edges = np.unique(np.percentile(param_values, percentile_edges))
+            actual_bins = len(bin_edges) - 1
+
+            groups_data    = []
+            groups_labels  = []
+            groups_medians = []
+
+            for b in range(actual_bins):
+                lo, hi = bin_edges[b], bin_edges[b + 1]
+                mask = (param_values >= lo) & (param_values <= hi) \
+                       if b == actual_bins - 1 \
+                       else (param_values >= lo) & (param_values < hi)
+                group_wr = win_rates_arr[mask]
+                if len(group_wr) == 0:
+                    continue
+                groups_data.append(group_wr)
+                lbl = f'{lo:.3g}' if lo == hi else f'[{lo:.3g}, {hi:.3g}]'
+                groups_labels.append(f'{lbl}\n(n={len(group_wr)})')
+                groups_medians.append(np.median(group_wr))
+
+            if groups_data:
+                cmap = plt.cm.RdYlGn
+                med_min, med_max = min(groups_medians), max(groups_medians)
+                med_range = med_max - med_min if med_max != med_min else 1.0
+                box_colors = [cmap((m - med_min) / med_range) for m in groups_medians]
+
+                bp = ax.boxplot(
+                    groups_data,
+                    labels=groups_labels,
+                    patch_artist=True,
+                    notch=use_notch and all(len(g) >= 5 for g in groups_data),
+                    showmeans=True,
+                    meanprops=dict(marker='D', markerfacecolor='navy',
+                                   markeredgecolor='navy', markersize=6),
+                    medianprops=dict(color='black', linewidth=2),
+                    flierprops=dict(marker='o', markersize=3, alpha=0.4,
+                                    markerfacecolor='gray'),
+                )
+                for patch, color in zip(bp['boxes'], box_colors):
+                    patch.set_facecolor(color)
+                    patch.set_alpha(0.75)
+
+                # Jitter overlay
+                if show_points:
+                    rng = np.random.default_rng(seed=42)
+                    for i, group_wr in enumerate(groups_data, start=1):
+                        jitter = rng.uniform(-0.18, 0.18, size=len(group_wr))
+                        ax.scatter(
+                            np.full(len(group_wr), i) + jitter,
+                            group_wr,
+                            alpha=0.35, s=14, color='steelblue', zorder=3
+                        )
+
+        ax.set_title(
+            f'{hyperparam_labels[param]} vs Win Rate\n'
+            f'({n_trials_total} trials · {n_bins} bins por percentil)',
+            fontsize=13, fontweight='bold'
+        )
+        ax.set_xlabel(hyperparam_labels[param], fontsize=11)
+        ax.set_ylabel('Win Rate (%)', fontsize=11)
+        ax.tick_params(axis='x', labelsize=9)
         ax.grid(True, alpha=0.3, axis='y')
-    
-    plt.tight_layout()
-    plot_path_boxplots = os.path.join(save_dir, "smac_hyperparams_boxplots.png")
-    plt.savefig(plot_path_boxplots, dpi=300, bbox_inches='tight')
-    print(f"Gráfica guardada: {plot_path_boxplots}")
-    plt.close()
-    
+
+        legend_elements = [
+            Line2D([0], [0], marker='D', color='w', markerfacecolor='navy',
+                   markersize=7, label='Media'),
+            Line2D([0], [0], color='black', linewidth=2, label='Mediana'),
+        ]
+        ax.legend(handles=legend_elements, fontsize=9, loc='upper right')
+
+        plt.tight_layout()
+        plot_path_bp = os.path.join(save_dir, f"smac_boxplot_{param}.png")
+        plt.savefig(plot_path_bp, dpi=300, bbox_inches='tight')
+        print(f"Gráfica guardada: {plot_path_bp}")
+        plt.close()
+        plot_paths_boxplots.append(plot_path_bp)
+
     print(f"\nTodas las gráficas guardadas en: {save_dir}/")
     print(f"  - {os.path.basename(plot_path_1)}")
     print(f"  - {os.path.basename(plot_path_2)}")
     print(f"  - {os.path.basename(plot_path_3)}")
     if objective.results_history:
         print(f"  - {os.path.basename(plot_path_4)}")
-    print(f"  - 6 gráficos de hiperparámetros individuales vs win_rate")
+    print(f"  - 6 gráficos de hiperparámetros individuales vs win_rate (scatter)")
     print(f"  - {os.path.basename(plot_path_corr)}")
     if len(top_trials) > 1:
         print(f"  - {os.path.basename(plot_path_evolution)}")
-    print(f"  - {os.path.basename(plot_path_boxplots)}")
+    for pp in plot_paths_boxplots:
+        print(f"  - {os.path.basename(pp)}")
     
     # Tabla resumen
     print(f"\n{'='*70}")
