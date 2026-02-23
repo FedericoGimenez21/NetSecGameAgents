@@ -918,9 +918,27 @@ class SMACGAObjective:
         Returns:
             float: Costo a minimizar (100 - win_rate) / 100. Menor es mejor.
         """
+        # Sincronizar estado desde el checkpoint antes de incrementar.
+        # Necesario cuando pynisher (trial_walltime_limit) ejecuta train() en un
+        # subproceso: self es una copia pickled del padre; los cambios locales
+        # no se propagan de vuelta. El checkpoint actúa como estado compartido.
+        if self.checkpoint_file and os.path.isfile(self.checkpoint_file):
+            try:
+                with open(self.checkpoint_file, 'r', encoding='utf-8') as _f:
+                    _ckpt = json.load(_f)
+                self.trial_count     = _ckpt.get('trial_count', self.trial_count)
+                self.best_win_rate   = _ckpt.get('best_win_rate', self.best_win_rate)
+                self.best_trial      = _ckpt.get('best_trial', self.best_trial)
+                self.results_history = _ckpt.get('results_history', self.results_history)
+            except Exception:
+                pass  # Si el checkpoint falla, usamos el estado local
+
         self.trial_count += 1
         trial_num = self.trial_count
-        
+        # Persistir el contador incrementado de inmediato, para que el próximo
+        # subproceso/llamada ya lo vea aunque este trial sea interrumpido.
+        self._save_checkpoint()
+
         population_size = config["population_size"]
         n_generations = config["n_generations"]
         sbx_prob = config["sbx_prob"]
