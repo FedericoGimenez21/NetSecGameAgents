@@ -50,7 +50,6 @@ class QTableOptimizationProblem(Problem):
                  actions_file="registration_info.json",
                  states_file="estadosSMALL.json",
                  n_workers=1,
-                 required_players=6,
                  task_config_path=None):
         """
         Inicializa el problema de optimización de Q-table.
@@ -63,8 +62,8 @@ class QTableOptimizationProblem(Problem):
             reward_range (tuple): Rango de valores para los Q-values
             actions_file (str): Ruta al archivo registration_info.json con las acciones
             states_file (str): Ruta al archivo con los estados específicos
-            n_workers (int): Número de workers paralelos para evaluar individuos
-            required_players (int): (Legado) Solo se usa cuando task_config_path=None.
+            n_workers (int): Número de workers paralelos para evaluar individuos.
+                             Solo tiene efecto cuando task_config_path está provisto.
             task_config_path (str): Ruta al netsecenv_conf.yaml. Si se provee, el GA
                                     gestiona automáticamente N instancias de NetSecGame
                                     en puertos consecutivos (modo multi-servidor).
@@ -77,7 +76,6 @@ class QTableOptimizationProblem(Problem):
         self.actions_file = actions_file
         self.states_file = states_file
         self.n_workers = max(1, n_workers)
-        self.required_players = max(1, required_players)
         self.task_config_path = task_config_path
         self._print_lock = threading.Lock()
         self._server_procs = None   # Servidores persistentes (ciclo de vida externo)
@@ -116,7 +114,7 @@ class QTableOptimizationProblem(Problem):
             print(f"  Config: {self.task_config_path}")
             print(f"  Puertos: {self.port} – {self.port + self.n_workers - 1}")
         else:
-            print(f"Modo servidor externo (required_players={self.required_players})")
+            print(f"Modo servidor externo (evaluación secuencial)")
 
     # ----------------------------------------------------------------
     # Soporte de pickling: threading.Lock no es serializable, se omite
@@ -134,8 +132,6 @@ class QTableOptimizationProblem(Problem):
         self._print_lock = threading.Lock()
         self._server_procs = None
         self._port_pool = None
-        if 'required_players' not in state:
-            self.required_players = 6
         if 'task_config_path' not in state:
             self.task_config_path = None
 
@@ -385,12 +381,11 @@ class QTableOptimizationProblem(Problem):
           El GA lanza N instancias independientes de NetSecGame en puertos
           consecutivos (port, port+1, ...). Los individuos se distribuyen sobre
           un pool de puertos y se evalúan con paralelismo real sin batching.
-          Los servidores se inician al principio de cada generación y se detienen
-          al finalizar, incluso ante errores.
+          Los servidores son iniciados antes de la optimización y se reutilizan
+          en todas las generaciones.
 
         **Modo servidor externo** (task_config_path=None):
-          - n_workers=1: secuencial en self.port.
-          - n_workers>1: lotes de required_players (legado, para required_players>1).
+          Evaluación secuencial en self.port, independientemente de n_workers.
         """
         total = len(X)
         objectives = [None] * total
@@ -421,41 +416,13 @@ class QTableOptimizationProblem(Problem):
                     idx, fitness = future.result()
                     objectives[idx] = fitness
 
-        elif self.n_workers == 1:
+        else:
             # --------------------------------------------------------
-            # Servidor externo, evaluación secuencial
+            # Servidor externo: evaluación secuencial en self.port
             # --------------------------------------------------------
             for idx, x in enumerate(X):
                 _, fitness = self._evaluate_single(idx, x, total)
                 objectives[idx] = fitness
-        else:
-            # --------------------------------------------------------
-            # Servidor externo, lotes de required_players (legado)
-            # --------------------------------------------------------
-            batch_size = min(self.n_workers, self.required_players)
-            n_batches = (total + batch_size - 1) // batch_size
-            print(
-                f"\nEvaluando {total} individuos en {n_batches} lote(s) "
-                f"de hasta {batch_size} workers "
-                f"(required_players={self.required_players})..."
-            )
-            for batch_num in range(n_batches):
-                batch_start = batch_num * batch_size
-                batch_end = min(batch_start + batch_size, total)
-                batch_indices = list(range(batch_start, batch_end))
-                print(
-                    f"  Lote {batch_num + 1}/{n_batches}: "
-                    f"individuos {batch_start + 1}–{batch_end} de {total}"
-                )
-                with ThreadPoolExecutor(max_workers=len(batch_indices)) as executor:
-                    futures = {
-                        executor.submit(self._evaluate_single, idx, X[idx], total): idx
-                        for idx in batch_indices
-                    }
-                    for future in as_completed(futures):
-                        idx, fitness = future.result()
-                        objectives[idx] = fitness
-                print(f"  Lote {batch_num + 1}/{n_batches} completado.")
 
         out["F"] = np.array(objectives)
     
@@ -555,7 +522,6 @@ class QTableGeneticOptimizer:
                  actions_file="registration_info.json",
                  states_file="estadosSMALL.json",
                  n_workers=1,
-                 required_players=6,
                  task_config_path=None):
         """
         Inicializa el optimizador.
@@ -568,8 +534,7 @@ class QTableGeneticOptimizer:
             reward_range (tuple): Rango de valores para la Q-table
             actions_file (str): Ruta al archivo con las acciones registradas
             states_file (str): Ruta al archivo con los estados específicos
-            n_workers (int): Número de workers paralelos para evaluar individuos
-            required_players (int): (Legado) Solo se usa cuando task_config_path=None.
+            n_workers (int): Número de workers paralelos (activo solo con task_config_path).
             task_config_path (str): Ruta al netsecenv_conf.yaml. Si se provee, el GA
                                     gestiona sus propias instancias de NetSecGame.
         """
@@ -581,7 +546,6 @@ class QTableGeneticOptimizer:
         self.actions_file = actions_file
         self.states_file = states_file
         self.n_workers = n_workers
-        self.required_players = required_players
         self.task_config_path = task_config_path
         
         # Crear el problema de optimización
@@ -594,7 +558,6 @@ class QTableGeneticOptimizer:
             actions_file=actions_file,
             states_file=states_file,
             n_workers=n_workers,
-            required_players=required_players,
             task_config_path=task_config_path
         )
         
@@ -864,7 +827,6 @@ class SMACGAObjective:
         self.best_trial = -1
         self.results_history = []
         self.n_workers = base_config.get('n_workers', 1)
-        self.required_players = base_config.get('required_players', 6)
         self.task_config_path = base_config.get('task_config_path', None)
 
         # Restaurar estado desde checkpoint si existe
@@ -966,7 +928,6 @@ class SMACGAObjective:
                 actions_file=self.base_config['actions_file'],
                 states_file=self.base_config['states_file'],
                 n_workers=self.n_workers,
-                required_players=self.required_players,
                 task_config_path=self.task_config_path
             )
             
@@ -1711,11 +1672,6 @@ Ejemplo de uso:
                             f"Por defecto 1 (secuencial). Máximo recomendado: {multiprocessing.cpu_count()}.",
                        default=1,
                        type=int)
-    parser.add_argument("--required_players",
-                       help="(Legado) Jugadores requeridos por el servidor. Solo se usa cuando "
-                            "--task_config no se proporciona. Por defecto 1.",
-                       default=1,
-                       type=int)
     parser.add_argument("--task_config",
                        help="Ruta al netsecenv_conf.yaml. Si se provee, el GA gestiona "
                             "automáticamente N instancias de NetSecGame en puertos consecutivos "
@@ -1764,7 +1720,6 @@ Ejemplo de uso:
             'actions_file': args.actions,
             'states_file': args.states,
             'n_workers': args.workers,
-            'required_players': args.required_players,
             'task_config_path': args.task_config,
         }
         
@@ -1795,7 +1750,6 @@ Ejemplo de uso:
                 actions_file=args.actions,
                 states_file=args.states,
                 n_workers=args.workers,
-                required_players=args.required_players,
                 task_config_path=args.task_config
             )
             
@@ -1847,7 +1801,6 @@ Ejemplo de uso:
             actions_file=args.actions,
             states_file=args.states,
             n_workers=args.workers,
-            required_players=args.required_players,
             task_config_path=args.task_config
         )
         
