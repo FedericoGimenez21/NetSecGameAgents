@@ -261,6 +261,7 @@ class QTableOptimizationProblem(Problem):
                 f'--task_config={self.task_config_path}',
                 f'--game_port={port}',
                 f'--game_host={self.host}',
+                f'--debug_level=CRITICAL',
             ]
             proc = subprocess.Popen(
                 cmd,
