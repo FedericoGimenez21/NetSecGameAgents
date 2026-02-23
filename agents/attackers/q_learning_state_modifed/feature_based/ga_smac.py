@@ -1142,7 +1142,7 @@ def plot_smac_results(objective, save_dir="smac_plots"):
     # 1. Win rate por trial
     # ================================================================
     plt.figure(figsize=(10, 6))
-    plt.bar(trials, win_rates, color='steelblue', alpha=0.7, label='Win Rate')
+    plt.plot(trials, win_rates, 'o-', color='steelblue', linewidth=2, markersize=5, label='Win Rate')
     plt.title('Win Rate por Trial (SMAC)', fontsize=13, fontweight='bold')
     plt.xlabel('Trial')
     plt.ylabel('Win Rate (%)')
