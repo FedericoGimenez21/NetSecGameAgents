@@ -826,6 +826,7 @@ class SMACGAObjective:
         self.best_win_rate = 0.0
         self.best_trial = -1
         self.results_history = []
+        self.execution_state = "activo"   # activo | detenido | finalizado
         self.n_workers = base_config.get('n_workers', 1)
         self.task_config_path = base_config.get('task_config_path', None)
 
@@ -834,12 +835,16 @@ class SMACGAObjective:
             try:
                 with open(checkpoint_file, 'r', encoding='utf-8') as _f:
                     _ckpt = json.load(_f)
-                self.results_history = _ckpt.get('results_history', [])
-                self.best_win_rate   = _ckpt.get('best_win_rate', 0.0)
-                self.best_trial      = _ckpt.get('best_trial', -1)
-                self.trial_count     = _ckpt.get('trial_count', 0)
+                self.results_history  = _ckpt.get('results_history', [])
+                self.best_win_rate    = _ckpt.get('best_win_rate', 0.0)
+                self.best_trial       = _ckpt.get('best_trial', -1)
+                self.trial_count      = _ckpt.get('trial_count', 0)
+                self.execution_state  = _ckpt.get('execution_state', 'activo')
                 print(f"[Checkpoint] Estado restaurado: {len(self.results_history)} trials previos, "
-                      f"mejor win_rate = {self.best_win_rate:.2f}% (trial {self.best_trial})")
+                      f"mejor win_rate = {self.best_win_rate:.2f}% (trial {self.best_trial}), "
+                      f"estado anterior = '{self.execution_state}'")
+                # Al reanudar, volver a marcar como activo
+                self.execution_state = "activo"
             except Exception as _e:
                 print(f"[Checkpoint] Advertencia: no se pudo cargar '{checkpoint_file}': {_e}")
     
@@ -993,11 +998,12 @@ class SMACGAObjective:
             return
         try:
             ckpt = {
-                'trial_count':    self.trial_count,
-                'best_win_rate':  self.best_win_rate,
-                'best_trial':     self.best_trial,
+                'trial_count':     self.trial_count,
+                'best_win_rate':   self.best_win_rate,
+                'best_trial':      self.best_trial,
                 'results_history': self.results_history,
-                'saved_at':       datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'execution_state': self.execution_state,
+                'saved_at':        datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
             # Escritura atómica: primero en un temporal, luego rename
             tmp = self.checkpoint_file + '.tmp'
@@ -1100,11 +1106,26 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     )
     
     # Ejecutar optimización
-    incumbent = smac.optimize()
-    
+    try:
+        incumbent = smac.optimize()
+    except KeyboardInterrupt:
+        objective.execution_state = "detenido"
+        objective._save_checkpoint()
+        print("\n[Estado] Optimización DETENIDA por el usuario. Checkpoint guardado.")
+        raise
+    except Exception as _exc:
+        objective.execution_state = "detenido"
+        objective._save_checkpoint()
+        print(f"\n[Estado] Optimización DETENIDA por error: {_exc}. Checkpoint guardado.")
+        raise
+
     # Validar la configuración incumbente
     incumbent_cost = smac.validate(incumbent)
     incumbent_win_rate = 100.0 * (1.0 - incumbent_cost)
+
+    # Marcar como finalizado y persistir
+    objective.execution_state = "finalizado"
+    objective._save_checkpoint()
     
     # Mostrar resultados
     print(f"\n{'='*70}")
