@@ -1455,7 +1455,7 @@ def plot_smac_results(objective, save_dir="smac_plots"):
     for pp in plot_paths_boxplots:
         print(f"  - {os.path.basename(pp)}")
     
-    # Tabla resumen
+    # Tabla resumen (consola)
     print(f"\n{'='*70}")
     print("RESUMEN DE TODOS LOS TRIALS (SMAC)")
     print(f"{'='*70}")
@@ -1468,6 +1468,81 @@ def plot_smac_results(objective, save_dir="smac_plots"):
               f"{c.get('sbx_prob', 0):>7.4f} | {c.get('sbx_eta', 0):>8.2f} | "
               f"{c.get('pm_prob_var', 0):>7.4f} | {c.get('pm_eta', 0):>8.2f}")
     print(f"{'='*70}\n")
+
+    # ================================================================
+    # README con rango de hiperparámetros y tabla resumen
+    # ================================================================
+    readme_path = os.path.join(save_dir, "README.md")
+    try:
+        # Obtener rangos desde el configspace
+        cs = objective.configspace
+        hp_ranges = {}
+        for hp in cs.get_hyperparameters():
+            if hasattr(hp, 'lower') and hasattr(hp, 'upper'):
+                hp_ranges[hp.name] = (hp.lower, hp.upper, type(hp).__name__)
+            else:
+                hp_ranges[hp.name] = (None, None, type(hp).__name__)
+
+        hyperparam_labels = {
+            'population_size': 'Population Size',
+            'n_generations':   'Number of Generations',
+            'sbx_prob':        'SBX Probability',
+            'sbx_eta':         'SBX Eta',
+            'pm_prob_var':     'PM Prob Var',
+            'pm_eta':          'PM Eta',
+        }
+
+        lines = []
+        lines.append("# SMAC3 – Resultados de Optimización de Hiperparámetros\n")
+        lines.append(f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  \n")
+        lines.append(f"Trials ejecutados: {len(objective.results_history)}  \n")
+        if objective.results_history:
+            best = max(objective.results_history, key=lambda x: x['win_rate'])
+            lines.append(f"Mejor win rate: **{best['win_rate']:.2f}%** (trial {best['trial']})  \n")
+        lines.append("\n---\n")
+
+        # Sección: rango de hiperparámetros
+        lines.append("## Espacio de búsqueda (rango de hiperparámetros)\n\n")
+        lines.append("| Hiperparámetro | Etiqueta | Tipo | Mínimo | Máximo |\n")
+        lines.append("|---|---|---|---|---|\n")
+        for name, (lo, hi, htype) in hp_ranges.items():
+            label = hyperparam_labels.get(name, name)
+            tipo = "Entero" if "Integer" in htype else "Float"
+            lo_str = str(lo) if lo is not None else "—"
+            hi_str = str(hi) if hi is not None else "—"
+            lines.append(f"| `{name}` | {label} | {tipo} | {lo_str} | {hi_str} |\n")
+        lines.append("\n**Valores fijos (no optimizados):**\n")
+        lines.append("- `sbx_prob_var` = 1.0\n")
+        lines.append("- `pm_prob` = 1.0\n")
+        lines.append("- `test_episodes` = 25\n")
+        lines.append("- `reward_range` = (−1, 1)\n")
+        lines.append("\n---\n")
+
+        # Sección: tabla resumen de trials
+        lines.append("## Tabla de resultados (ordenada por Win Rate)\n\n")
+        lines.append("| Trial | Win Rate | Costo | Pop | Gens | SBX_P | SBX_eta | PM_pv | PM_eta |\n")
+        lines.append("|------:|----------:|------:|----:|----:|------:|--------:|------:|-------:|\n")
+        for r in sorted(objective.results_history, key=lambda x: x['win_rate'], reverse=True):
+            c = r['config']
+            lines.append(
+                f"| {r['trial']} | {r['win_rate']:.2f}% | {r['cost']:.4f} | "
+                f"{c.get('population_size', '?')} | {c.get('n_generations', '?')} | "
+                f"{c.get('sbx_prob', 0):.4f} | {c.get('sbx_eta', 0):.2f} | "
+                f"{c.get('pm_prob_var', 0):.4f} | {c.get('pm_eta', 0):.2f} |\n"
+            )
+        lines.append("\n---\n")
+
+        # Sección: gráficas generadas
+        lines.append("## Gráficas generadas\n\n")
+        plot_files = [f for f in os.listdir(save_dir) if f.endswith(".png")]
+        for pf in sorted(plot_files):
+            lines.append(f"![{pf}]({pf})\n\n")
+
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        print(f"README guardado en: {readme_path}")
+    except Exception as e:
+        print(f"Advertencia: no se pudo generar el README: {e}")
 
 
 def main():
