@@ -901,8 +901,8 @@ class SMACGAObjective:
         """
         cs = ConfigurationSpace(seed=42)
         
-        population_size = Integer("population_size", (5, 20))
-        n_generations = Integer("n_generations", (5, 20))
+        population_size = Integer("population_size", (90, 200))
+        n_generations = Integer("n_generations", (10, 230))
         sbx_prob = Float("sbx_prob", (0.8, 1.0))
         sbx_eta = Float("sbx_eta", (0.0, 60.0))
         pm_prob_var = Float("pm_prob_var", (0.01, 0.6))
