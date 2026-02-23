@@ -1059,7 +1059,8 @@ class SMACGAObjective:
 
 
 def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_workers=1,
-                       ga_timeout=None, trial_walltime_limit=None, walltime_limit=None):
+                       ga_timeout=None, trial_walltime_limit=None, walltime_limit=None,
+                       smac_overwrite=False):
     """
     Ejecuta optimización de hiperparámetros con SMAC3.
     
@@ -1091,6 +1092,10 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
             tiempo, SMAC lo penaliza y continúa con el siguiente. Por defecto None.
         walltime_limit (float | None): Tiempo máximo total en segundos para toda la
             ejecución de SMAC. Por defecto None (equivale a np.inf, sin límite).
+        smac_overwrite (bool): Si True, borra la ejecución anterior de SMAC y comienza
+            desde cero, ignorando cualquier checkpoint existente. Equivale a responder
+            '1' al prompt interactivo de SMAC cuando el escenario cambió. Útil para
+            ejecuciones con nohup donde no es posible responder prompts. Por defecto False.
         
     Returns:
         tuple: (incumbent_config, objective_instance, smac_instance)
@@ -1104,11 +1109,12 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
 
     # ----------------------------------------------------------------
     # Checkpoint: detectar si existe una ejecución previa para reanudar
+    # smac_overwrite=True fuerza inicio desde cero (sin prompt interactivo).
     # ----------------------------------------------------------------
     os.makedirs(output_dir, exist_ok=True)
     checkpoint_file = os.path.join(output_dir, 'objective_checkpoint.json')
     smac_run_dir = Path(output_dir) / 'ga_qtable_optimization'
-    resuming = smac_run_dir.exists() and os.path.isfile(checkpoint_file)
+    resuming = (not smac_overwrite) and smac_run_dir.exists() and os.path.isfile(checkpoint_file)
 
     # Crear instancia del objetivo (restaura historial previo si existe checkpoint)
     objective = SMACGAObjective(base_config, checkpoint_file=checkpoint_file)
@@ -1134,7 +1140,9 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     )
     
     print(f"\n{'='*70}")
-    if resuming:
+    if smac_overwrite:
+        print(f"INICIANDO OPTIMIZACIÓN CON SMAC3 (sobreescritura forzada)")
+    elif resuming:
         print(f"REANUDANDO OPTIMIZACIÓN CON SMAC3 (checkpoint detectado)")
     else:
         print(f"INICIANDO OPTIMIZACIÓN CON SMAC3")
@@ -1152,6 +1160,8 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
         print(f"Límite por trial (trial_walltime_limit): {trial_walltime_limit}s  [SMAC/pynisher nativo]")
     if walltime_limit is not None:
         print(f"Límite total SMAC (walltime_limit): {walltime_limit}s")
+    if smac_overwrite:
+        print(f"Modo: SOBREESCRITURA (ejecución anterior eliminada, sin prompts)")
     print(f"\nNOTA: SMAC3 puede ejecutar trials adicionales debido a:")
     print(f"      - Diseño inicial (warm-up del Random Forest)")
     print(f"      - Validación de la configuración incumbente")
@@ -1159,12 +1169,13 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     print(f"{'='*70}\n")
     
     # Crear facade SMAC
-    # overwrite=False cuando se reanuda para que SMAC retome su propio historial
+    # overwrite=True: empieza desde cero (smac_overwrite forzado, o primera ejecución)
+    # overwrite=False: reanuda ejecución existente (requiere escenario idéntico)
     smac = HyperparameterOptimizationFacade(
         scenario=scenario,
         target_function=objective.train,
         initial_design=initial_design,
-        overwrite=not resuming,  # False = reanudar; True = empezar desde cero
+        overwrite=smac_overwrite or not resuming,
     )
     
     # Ejecutar optimización
@@ -1786,6 +1797,12 @@ Ejemplo de uso:
                             "Ejemplo: --walltime_limit 86400 (24 horas). Por defecto sin límite.",
                        default=None,
                        type=float)
+    parser.add_argument("--smac_overwrite",
+                       help="Fuerza inicio desde cero eliminando la ejecución anterior de SMAC, "
+                            "sin mostrar prompts interactivos. Necesario cuando el escenario cambia "
+                            "(p.ej. distinto walltime_limit) y se ejecuta con nohup o en background. "
+                            "Solo aplica en modo SMAC.",
+                       action='store_true')
     
     args = parser.parse_args()
     
@@ -1839,6 +1856,7 @@ Ejemplo de uso:
             ga_timeout=args.ga_timeout,
             trial_walltime_limit=args.trial_walltime_limit,
             walltime_limit=args.walltime_limit,
+            smac_overwrite=args.smac_overwrite,
         )
         
         # Generar visualizaciones
