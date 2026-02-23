@@ -848,14 +848,17 @@ class SMACGAObjective:
     Esta clase almacena la configuración base y los mejores resultados.
     """
     
-    def __init__(self, base_config):
+    def __init__(self, base_config, checkpoint_file=None):
         """
         Args:
             base_config (dict): Configuración base con parámetros fijos
                 - agent_script_path, host, port, actions_file, states_file
                 - n_workers (opcional): número de workers paralelos
+            checkpoint_file (str): Ruta al archivo JSON de checkpoint.
+                Si existe, se restaura el estado de ejecuciones anteriores.
         """
         self.base_config = base_config
+        self.checkpoint_file = checkpoint_file
         self.trial_count = 0
         self.best_win_rate = 0.0
         self.best_trial = -1
@@ -863,6 +866,20 @@ class SMACGAObjective:
         self.n_workers = base_config.get('n_workers', 1)
         self.required_players = base_config.get('required_players', 6)
         self.task_config_path = base_config.get('task_config_path', None)
+
+        # Restaurar estado desde checkpoint si existe
+        if checkpoint_file and os.path.isfile(checkpoint_file):
+            try:
+                with open(checkpoint_file, 'r', encoding='utf-8') as _f:
+                    _ckpt = json.load(_f)
+                self.results_history = _ckpt.get('results_history', [])
+                self.best_win_rate   = _ckpt.get('best_win_rate', 0.0)
+                self.best_trial      = _ckpt.get('best_trial', -1)
+                self.trial_count     = _ckpt.get('trial_count', 0)
+                print(f"[Checkpoint] Estado restaurado: {len(self.results_history)} trials previos, "
+                      f"mejor win_rate = {self.best_win_rate:.2f}% (trial {self.best_trial})")
+            except Exception as _e:
+                print(f"[Checkpoint] Advertencia: no se pudo cargar '{checkpoint_file}': {_e}")
     
     @property
     def configspace(self) -> ConfigurationSpace:
@@ -991,14 +1008,43 @@ class SMACGAObjective:
                 print(f"  -> Nuevo mejor resultado! Q-table guardada en: {output_file}")
             
             print(f"\nTrial {trial_num} completado: win_rate = {best_win_rate:.2f}%, cost = {cost:.4f}\n")
-            
+            self._save_checkpoint()
             return cost
             
         except Exception as e:
             print(f"\nError en trial {trial_num}: {e}\n")
             import traceback
             traceback.print_exc()
+            # Registrar el trial fallido con penalización para que SMAC lo tenga en cuenta
+            self.results_history.append({
+                'trial': trial_num,
+                'win_rate': 0.0,
+                'cost': 1.0,
+                'config': dict(config),
+                'error': str(e),
+            })
+            self._save_checkpoint()
             return 1.0  # Penalización máxima (win_rate = 0%)
+
+    def _save_checkpoint(self):
+        """Persiste el estado actual al archivo de checkpoint (si está configurado)."""
+        if not self.checkpoint_file:
+            return
+        try:
+            ckpt = {
+                'trial_count':    self.trial_count,
+                'best_win_rate':  self.best_win_rate,
+                'best_trial':     self.best_trial,
+                'results_history': self.results_history,
+                'saved_at':       datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            # Escritura atómica: primero en un temporal, luego rename
+            tmp = self.checkpoint_file + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(ckpt, f, indent=2, default=str)
+            os.replace(tmp, self.checkpoint_file)
+        except Exception as _e:
+            print(f"[Checkpoint] Advertencia: no se pudo guardar checkpoint: {_e}")
 
 
 def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_workers=1):
@@ -1035,8 +1081,16 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     # Inyectar n_workers en la configuración base si no está presente
     base_config = {**base_config, 'n_workers': n_workers}
 
-    # Crear instancia del objetivo
-    objective = SMACGAObjective(base_config)
+    # ----------------------------------------------------------------
+    # Checkpoint: detectar si existe una ejecución previa para reanudar
+    # ----------------------------------------------------------------
+    os.makedirs(output_dir, exist_ok=True)
+    checkpoint_file = os.path.join(output_dir, 'objective_checkpoint.json')
+    smac_run_dir = Path(output_dir) / 'ga_qtable_optimization'
+    resuming = smac_run_dir.exists() and os.path.isfile(checkpoint_file)
+
+    # Crear instancia del objetivo (restaura historial previo si existe checkpoint)
+    objective = SMACGAObjective(base_config, checkpoint_file=checkpoint_file)
     
     # Crear Scenario de SMAC
     scenario = Scenario(
@@ -1057,12 +1111,18 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     )
     
     print(f"\n{'='*70}")
-    print(f"INICIANDO OPTIMIZACIÓN CON SMAC3")
+    if resuming:
+        print(f"REANUDANDO OPTIMIZACIÓN CON SMAC3 (checkpoint detectado)")
+    else:
+        print(f"INICIANDO OPTIMIZACIÓN CON SMAC3")
     print(f"{'='*70}")
     print(f"Trials a ejecutar: {n_trials}")
     print(f"Modelo surrogate: Random Forest (default de SMAC)")
     print(f"Configuraciones iniciales: {n_initial_configs} (~{(n_initial_configs/n_trials)*100:.0f}% de trials)")
     print(f"Directorio de salida: {output_dir}")
+    print(f"Archivo de checkpoint: {checkpoint_file}")
+    if resuming:
+        print(f"Trials ya completados (cargados): {len(objective.results_history)}")
     print(f"\nNOTA: SMAC3 puede ejecutar trials adicionales debido a:")
     print(f"      - Diseño inicial (warm-up del Random Forest)")
     print(f"      - Validación de la configuración incumbente")
@@ -1070,11 +1130,12 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     print(f"{'='*70}\n")
     
     # Crear facade SMAC
+    # overwrite=False cuando se reanuda para que SMAC retome su propio historial
     smac = HyperparameterOptimizationFacade(
         scenario=scenario,
         target_function=objective.train,
         initial_design=initial_design,
-        overwrite=True,  # Sobreescribir ejecuciones previas (o usar False para continuar)
+        overwrite=not resuming,  # False = reanudar; True = empezar desde cero
     )
     
     # Ejecutar optimización
