@@ -572,6 +572,7 @@ class QTableGeneticOptimizer:
                  sbx_eta=15,
                  pm_prob_var=0.1,
                  pm_eta=20,
+                 ga_timeout=None,
                  verbose=True):
         """
         Ejecuta la optimización usando algoritmo genético.
@@ -586,6 +587,10 @@ class QTableGeneticOptimizer:
             sbx_eta (float): Índice de distribución SBX
             pm_prob_var (float): Probabilidad por variable de mutación PM
             pm_eta (float): Índice de distribución PM
+            ga_timeout (int | None): Tiempo límite en segundos para el GA.
+                Si se especifica, la optimización se detiene al alcanzar
+                n_generations O ga_timeout segundos (lo que ocurra primero).
+                Por defecto None (sin límite de tiempo).
             verbose (bool): Mostrar progreso
         
         Returns:
@@ -607,7 +612,8 @@ class QTableGeneticOptimizer:
         print(f"SBX prob: {sbx_prob}, eta: {sbx_eta}, prob_var: {sbx_prob_var} (fijo)")
         print(f"PM prob: {pm_prob} (fijo), prob_var: {pm_prob_var}, eta: {pm_eta}")
         print(f"Workers paralelos: {self.n_workers}")
-
+        if ga_timeout is not None:
+            print(f"Tiempo límite GA: {ga_timeout}s")
         print("="*70 + "\n")
         
         # Configurar algoritmo genético
@@ -619,8 +625,24 @@ class QTableGeneticOptimizer:
             eliminate_duplicates=True
         )
         
-        # Configurar terminación
-        termination = get_termination("n_gen", n_generations)
+        # Configurar terminación (n_gen, o n_gen + tiempo si ga_timeout está definido)
+        gen_termination = get_termination("n_gen", n_generations)
+        if ga_timeout is not None:
+            h, rem = divmod(int(ga_timeout), 3600)
+            m, s = divmod(rem, 60)
+            time_str = f"{h:02d}:{m:02d}:{s:02d}"
+            try:
+                from pymoo.termination.collection import TerminationCollection
+                termination = TerminationCollection(
+                    gen_termination,
+                    get_termination("time", time_str)
+                )
+                print(f"  Terminación: máx. {n_generations} gen. o {ga_timeout}s (lo que ocurra primero)")
+            except ImportError:
+                termination = gen_termination
+                print(f"  Advertencia: TerminationCollection no disponible; ga_timeout ignorado.")
+        else:
+            termination = gen_termination
         
         # Ejecutar optimización
         print("Iniciando evolución...\n")
@@ -829,6 +851,7 @@ class SMACGAObjective:
         self.execution_state = "activo"   # activo | detenido | finalizado
         self.n_workers = base_config.get('n_workers', 1)
         self.task_config_path = base_config.get('task_config_path', None)
+        self.ga_timeout = base_config.get('ga_timeout', None)      # límite por ejecución GA
 
         # Restaurar estado desde checkpoint si existe
         if checkpoint_file and os.path.isfile(checkpoint_file):
@@ -936,16 +959,18 @@ class SMACGAObjective:
                 task_config_path=self.task_config_path
             )
             
-            # Ejecutar optimización GA
-            optimized_q_table = optimizer.optimize(
+            # Ejecutar optimización GA (con límites de tiempo si están configurados)
+            optimize_kwargs = dict(
                 population_size=population_size,
                 n_generations=n_generations,
                 sbx_prob=sbx_prob,
                 sbx_eta=sbx_eta,
                 pm_prob_var=pm_prob_var,
                 pm_eta=pm_eta,
-                verbose=True
+                ga_timeout=self.ga_timeout,
+                verbose=True,
             )
+            optimized_q_table = optimizer.optimize(**optimize_kwargs)
             
             # Obtener el mejor fitness (último valor del historial)
             best_fitness = optimizer.optimization_history[-1]
@@ -1014,7 +1039,8 @@ class SMACGAObjective:
             print(f"[Checkpoint] Advertencia: no se pudo guardar checkpoint: {_e}")
 
 
-def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_workers=1):
+def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_workers=1,
+                       ga_timeout=None, trial_walltime_limit=None, walltime_limit=None):
     """
     Ejecuta optimización de hiperparámetros con SMAC3.
     
@@ -1037,6 +1063,15 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
         base_config: Diccionario con configuración base (agent_script, host, port, etc.)
         n_trials: Número de trials (evaluaciones) objetivo (el número real puede ser mayor)
         output_dir: Directorio para resultados de SMAC
+        n_workers: Número de workers paralelos
+        ga_timeout (int | None): Límite de tiempo en segundos para cada ejecución del GA
+            dentro de un trial. La optimización se detiene al alcanzar n_generations o
+            ga_timeout segundos (lo que ocurra primero). Por defecto None (sin límite).
+        trial_walltime_limit (float | None): Tiempo máximo en segundos permitido por trial.
+            Gestionado nativamente por SMAC3 mediante pynisher. Si el trial supera este
+            tiempo, SMAC lo penaliza y continúa con el siguiente. Por defecto None.
+        walltime_limit (float | None): Tiempo máximo total en segundos para toda la
+            ejecución de SMAC. Por defecto None (equivale a np.inf, sin límite).
         
     Returns:
         tuple: (incumbent_config, objective_instance, smac_instance)
@@ -1045,8 +1080,8 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     log_file, logger = setup_smac_logging()
     print(f"SMAC logs guardados en: {log_file}\n")
     
-    # Inyectar n_workers en la configuración base si no está presente
-    base_config = {**base_config, 'n_workers': n_workers}
+    # Inyectar opciones de ejecución en la configuración base
+    base_config = {**base_config, 'n_workers': n_workers, 'ga_timeout': ga_timeout}
 
     # ----------------------------------------------------------------
     # Checkpoint: detectar si existe una ejecución previa para reanudar
@@ -1067,6 +1102,8 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
         seed=42,
         output_directory=Path(output_dir),
         name="ga_qtable_optimization",
+        trial_walltime_limit=trial_walltime_limit,  # Límite por trial (gestionado por pynisher)
+        walltime_limit=walltime_limit if walltime_limit is not None else np.inf,  # Límite total SMAC
     )
     
     # Configurar el número de configuraciones iniciales (exploración)
@@ -1090,6 +1127,12 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     print(f"Archivo de checkpoint: {checkpoint_file}")
     if resuming:
         print(f"Trials ya completados (cargados): {len(objective.results_history)}")
+    if ga_timeout is not None:
+        print(f"Límite por GA (ga_timeout): {ga_timeout}s")
+    if trial_walltime_limit is not None:
+        print(f"Límite por trial (trial_walltime_limit): {trial_walltime_limit}s  [SMAC/pynisher nativo]")
+    if walltime_limit is not None:
+        print(f"Límite total SMAC (walltime_limit): {walltime_limit}s")
     print(f"\nNOTA: SMAC3 puede ejecutar trials adicionales debido a:")
     print(f"      - Diseño inicial (warm-up del Random Forest)")
     print(f"      - Validación de la configuración incumbente")
@@ -1701,6 +1744,29 @@ Ejemplo de uso:
                             "Ejemplo: --task_config ./AIDojoCoordinator/netsecenv_conf.yaml",
                        default=None,
                        type=str)
+    parser.add_argument("--ga_timeout",
+                       help="Tiempo límite en segundos para cada ejecución del GA. "
+                            "La optimización se detiene al alcanzar --generations generaciones "
+                            "O este tiempo, lo que ocurra primero. "
+                            "Aplica tanto en modo estándar como en cada trial SMAC. "
+                            "Ejemplo: --ga_timeout 3600 (1 hora). Por defecto sin límite.",
+                       default=None,
+                       type=int)
+    parser.add_argument("--trial_walltime_limit",
+                       help="Tiempo máximo en segundos permitido por trial SMAC. "
+                            "Gestionado nativamente por SMAC3 mediante pynisher: el proceso del "
+                            "trial es supervisado y terminado si excede el límite. "
+                            "Solo aplica en modo SMAC. "
+                            "Ejemplo: --trial_walltime_limit 7200 (2 horas). Por defecto sin límite.",
+                       default=None,
+                       type=float)
+    parser.add_argument("--walltime_limit",
+                       help="Tiempo máximo total en segundos para toda la ejecución de SMAC. "
+                            "SMAC dejará de lanzar nuevos trials al alcanzar este límite. "
+                            "Solo aplica en modo SMAC. "
+                            "Ejemplo: --walltime_limit 86400 (24 horas). Por defecto sin límite.",
+                       default=None,
+                       type=float)
     
     args = parser.parse_args()
     
@@ -1742,6 +1808,7 @@ Ejemplo de uso:
             'states_file': args.states,
             'n_workers': args.workers,
             'task_config_path': args.task_config,
+            'ga_timeout': args.ga_timeout,
         }
         
         # Ejecutar optimización con SMAC3
@@ -1749,7 +1816,10 @@ Ejemplo de uso:
             base_config=base_config,
             n_trials=args.smac_trials,
             output_dir=args.smac_output_dir,
-            n_workers=args.workers
+            n_workers=args.workers,
+            ga_timeout=args.ga_timeout,
+            trial_walltime_limit=args.trial_walltime_limit,
+            walltime_limit=args.walltime_limit,
         )
         
         # Generar visualizaciones
@@ -1782,6 +1852,7 @@ Ejemplo de uso:
                 sbx_eta=best_params['sbx_eta'],
                 pm_prob_var=best_params['pm_prob_var'],
                 pm_eta=best_params['pm_eta'],
+                ga_timeout=args.ga_timeout,
                 verbose=True
             )
             
@@ -1833,6 +1904,7 @@ Ejemplo de uso:
             sbx_eta=args.sbx_eta,
             pm_prob_var=args.pm_prob_var,
             pm_eta=args.pm_eta,
+            ga_timeout=args.ga_timeout,
             verbose=True
         )
         
