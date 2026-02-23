@@ -227,12 +227,12 @@ if __name__ == '__main__':
     # If there is a previous model passed. Always use it for both training and testing.
     if args.previous_model:
         # Load table
-        agent._logger.info(f'Loading the previous model in file {args.previous_model}')
+        #agent._logger.info(f'Loading the previous model in file {args.previous_model}')
         try:
             agent.load_q_table(args.previous_model)
         except FileNotFoundError:
             message = f'Problem loading the file: {args.previous_model}'
-            agent._logger.info(message)
+            #agent._logger.info(message)
             print(message)
 
 
@@ -299,15 +299,15 @@ if __name__ == '__main__':
             netsecenv_git_result = subprocess.run(netsecenv_command, shell=True, capture_output=True, text=True).stdout
             agents_command = "cd NetSecGameAgents; git rev-parse HEAD"
             agents_git_result = subprocess.run(agents_command, shell=True, capture_output=True, text=True).stdout
-            agent._logger.info(f'Using commits. NetSecEnv: {netsecenv_git_result}. Agents: {agents_git_result}')
+            #agent._logger.info(f'Using commits. NetSecEnv: {netsecenv_git_result}. Agents: {agents_git_result}')
             if not args.disable_mlflow:
                 mlflow.set_tag("NetSecEnv commit", netsecenv_git_result)
                 mlflow.set_tag("Agents commit", agents_git_result)
                 # Log the env conf
                 mlflow.log_artifact(args.env_conf)
-            agent._logger.info(f'Epsilon Start: {agent.epsilon_start}')
-            agent._logger.info(f'Epsilon End: {agent.epsilon_end}')
-            agent._logger.info(f'Epsilon Max Episodes: {agent.epsilon_max_episodes}')
+            #agent._logger.info(f'Epsilon Start: {agent.epsilon_start}')
+            #agent._logger.info(f'Epsilon End: {agent.epsilon_end}')
+            #agent._logger.info(f'Epsilon Max Episodes: {agent.epsilon_max_episodes}')
 
             for episode in range(1, args.episodes + 1):
                 if not early_stop:
@@ -332,10 +332,10 @@ if __name__ == '__main__':
                         num_max_steps_steps += [num_steps]
                         num_max_steps_returns += [reward]
 
-                    if args.testing:
-                        agent._logger.error(f"Testing episode {episode}: Steps={num_steps}. Reward {reward}. States in Q_table = {len(agent.q_values)}")
-                    elif not args.testing:
-                        agent._logger.error(f"Training episode {episode}: Steps={num_steps}. Reward {reward}. States in Q_table = {len(agent.q_values)}")
+                    #if args.testing:
+                        #agent._logger.error(f"Testing episode {episode}: Steps={num_steps}. Reward {reward}. States in Q_table = {len(agent.q_values)}")
+                    #elif not args.testing:
+                        #agent._logger.error(f"Training episode {episode}: Steps={num_steps}. Reward {reward}. States in Q_table = {len(agent.q_values)}")
 
                     # Reset the game
                     observation = agent.request_game_reset()
@@ -373,7 +373,7 @@ if __name__ == '__main__':
                                 average_max_steps_steps={eval_std_max_steps_steps:.3f} +- {eval_std_max_steps_steps:.3f},
                                 epsilon={agent.current_epsilon}
                                 '''
-                            agent._logger.info(text)
+                            ##agent._logger.info(text)
                             if not args.disable_mlflow:
                                 mlflow.log_metric("eval_avg_win_rate", eval_win_rate, step=episode)
                                 mlflow.log_metric("eval_avg_detection_rate", eval_detection_rate, step=episode)
@@ -426,7 +426,7 @@ if __name__ == '__main__':
                                     test_num_max_steps_steps += [test_num_steps]
                                     test_num_max_steps_returns += [test_reward]
 
-                                agent._logger.error(f"\tTesting episode {test_episode}: Steps={test_num_steps}. Reward {test_reward}. States in Q_table = {len(agent.q_values)}")
+                                ##agent._logger.error(f"\tTesting episode {test_episode}: Steps={test_num_steps}. Reward {test_reward}. States in Q_table = {len(agent.q_values)}")
 
                                 # Reset the game
                                 test_observation = agent.request_game_reset()
@@ -460,7 +460,7 @@ if __name__ == '__main__':
                                 average_max_steps_steps={test_std_max_steps_steps:.3f} +- {test_std_max_steps_steps:.3f},
                                 epsilon={agent.current_epsilon}
                                 '''
-                            agent._logger.info(text)
+                            ##agent._logger.info(text)
                             print(text)
                             # Store in mlflow
                             if not args.disable_mlflow:
@@ -498,9 +498,9 @@ if __name__ == '__main__':
                 epsilon={agent.current_epsilon}
                 '''
 
-            agent._logger.info(text)
+            #agent._logger.info(text)
             print(text)
-            agent._logger.error("Terminating interaction")
+            #agent._logger.error("Terminating interaction")
             agent.terminate_connection()
 
     except KeyboardInterrupt:
