@@ -1138,14 +1138,11 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
             dentro de un trial. La optimización se detiene al alcanzar n_generations o
             ga_timeout segundos (lo que ocurra primero). Por defecto None (sin límite).
             Si se omite pero trial_walltime_limit está definido, se deriva automáticamente
-            como int(trial_walltime_limit / n_workers * 0.80). CRÍTICO: pynisher acumula
-            CPU-time de los subprocesos hijo, así que con n_workers=4 el presupuesto de
-            wall-clock efectivo por trial es trial_walltime_limit / 4.
-        trial_walltime_limit (float | None): Tiempo máximo en segundos (CPU acumulado de
-            todos los hijos) permitido por trial. Gestionado por pynisher como red de
-            seguridad dura con SIGKILL. IMPORTANTE: con n_workers>1 el límite efectivo
-            de wall-clock es trial_walltime_limit / n_workers. Por eso ga_timeout se
-            auto-deriva dividiendo por n_workers y aplicando 80% de margen.
+            como int(trial_walltime_limit * 0.90).
+        trial_walltime_limit (float | None): Tiempo máximo de wall-clock en segundos
+            permitido por trial. Pynisher lo mide con el reloj de pared (SIGALRM /
+            thread de monitoreo), no como CPU acumulado. ga_timeout se auto-deriva
+            aplicando un 90% de margen sobre este valor.
             Por defecto None.
         walltime_limit (float | None): Tiempo máximo total en segundos para toda la
             ejecución de SMAC. Por defecto None (equivale a np.inf, sin límite).
@@ -1165,31 +1162,24 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     # Auto-derivar ga_timeout desde trial_walltime_limit cuando no se
     # especificó explícitamente.
     #
-    # PROBLEMA: pynisher acumula CPU-time de los procesos hijo.
-    # Con n_workers=4 corriendo en paralelo, cada segundo de wall-clock
-    # consume ~4 segundos de CPU. El límite efectivo de wall-clock es:
+    # trial_walltime_limit es tiempo de reloj real (wall-clock), no CPU
+    # acumulado. Pynisher lo implementa con SIGALRM / thread de monitoreo
+    # mirando el reloj de pared, independientemente del número de workers.
+    # Por tanto NO se divide por n_workers.
     #
-    #   wall_efectivo ≈ trial_walltime_limit / n_workers
+    #   ga_timeout = int(trial_walltime_limit * 0.90)
     #
-    # Entonces ga_timeout debe derivarse dividiendo por n_workers:
-    #
-    #   ga_timeout = int(trial_walltime_limit / n_workers * 0.80)
-    #
-    # El 80% deja un margen de seguridad del 20% para que stop_servers()
+    # El 90% deja un margen de seguridad del 10% para que stop_servers()
     # y _save_checkpoint() corran antes de que pynisher dispare SIGKILL.
     # pynisher queda como red de seguridad dura absolutamente.
     # ------------------------------------------------------------------
     if ga_timeout is None and trial_walltime_limit is not None:
-        # Si n_workers > 1 cada worker consume CPU en paralelo,
-        # por lo que pynisher llega al límite n_workers veces más rápido.
-        effective_wall = trial_walltime_limit / max(1, n_workers)
-        ga_timeout = int(effective_wall * 0.80)
+        ga_timeout = int(trial_walltime_limit * 0.90)
         print(
-            f"[Auto ga_timeout] trial_walltime_limit={trial_walltime_limit}s, "
-            f"n_workers={n_workers} → ga_timeout derivado = {ga_timeout}s\n"
-            f"  (wall efectivo ≈ {effective_wall:.0f}s × 80% de margen).\n"
-            f"  Esto garantiza que el GA pare de forma ordenada antes de que "
-            f"pynisher acumule el CPU-budget y mate el proceso.\n"
+            f"[Auto ga_timeout] trial_walltime_limit={trial_walltime_limit}s → "
+            f"ga_timeout derivado = {ga_timeout}s\n"
+            f"  ({trial_walltime_limit:.0f}s × 90% de margen de seguridad).\n"
+            f"  Garantiza que el GA pare ordenadamente antes del SIGKILL de pynisher.\n"
         )
 
     # Inyectar opciones de ejecución en la configuración base
@@ -1245,9 +1235,7 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     if ga_timeout is not None:
         print(f"Límite por GA (ga_timeout): {ga_timeout}s  [pymoo ordena detención; resultados siempre guardados]")
     if trial_walltime_limit is not None:
-        eff = trial_walltime_limit / max(1, n_workers)
-        print(f"Límite por trial (trial_walltime_limit): {trial_walltime_limit}s  [pynisher CPU acumulado]")
-        print(f"  → Wall efectivo por trial (con {n_workers} worker(s)): ~{eff:.0f}s")
+        print(f"Límite por trial (trial_walltime_limit): {trial_walltime_limit}s  [pynisher wall-clock]")
     if walltime_limit is not None:
         print(f"Límite total SMAC (walltime_limit): {walltime_limit}s")
     if smac_overwrite:
