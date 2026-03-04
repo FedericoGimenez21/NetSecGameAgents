@@ -1138,11 +1138,11 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
             dentro de un trial. La optimización se detiene al alcanzar n_generations o
             ga_timeout segundos (lo que ocurra primero). Por defecto None (sin límite).
             Si se omite pero trial_walltime_limit está definido, se deriva automáticamente
-            como int(trial_walltime_limit * 0.95).
+            como int(trial_walltime_limit * 0.85).
         trial_walltime_limit (float | None): Tiempo máximo de wall-clock en segundos
             permitido por trial. Pynisher lo mide con el reloj de pared (SIGALRM /
             thread de monitoreo), no como CPU acumulado. ga_timeout se auto-deriva
-            aplicando un 95% de margen sobre este valor.
+            aplicando un 85% de margen sobre este valor.
             Por defecto None.
         walltime_limit (float | None): Tiempo máximo total en segundos para toda la
             ejecución de SMAC. Por defecto None (equivale a np.inf, sin límite).
@@ -1167,18 +1167,18 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     # mirando el reloj de pared, independientemente del número de workers.
     # Por tanto NO se divide por n_workers.
     #
-    #   ga_timeout = int(trial_walltime_limit * 0.95)
+    #   ga_timeout = int(trial_walltime_limit * 0.85)
     #
-    # El 95% deja un margen de seguridad del 5% para que stop_servers()
+    # El 85% deja un margen de seguridad del 15% para que stop_servers()
     # y _save_checkpoint() corran antes de que pynisher dispare SIGKILL.
     # pynisher queda como red de seguridad dura absolutamente.
     # ------------------------------------------------------------------
     if ga_timeout is None and trial_walltime_limit is not None:
-        ga_timeout = int(trial_walltime_limit * 0.95)
+        ga_timeout = int(trial_walltime_limit * 0.85)
         print(
             f"[Auto ga_timeout] trial_walltime_limit={trial_walltime_limit}s → "
             f"ga_timeout derivado = {ga_timeout}s\n"
-            f"  ({trial_walltime_limit:.0f}s × 95% de margen de seguridad).\n"
+            f"  ({trial_walltime_limit:.0f}s × 85% de margen de seguridad).\n"
             f"  Garantiza que el GA pare ordenadamente antes del SIGKILL de pynisher.\n"
         )
 
