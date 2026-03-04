@@ -50,7 +50,8 @@ class QTableOptimizationProblem(Problem):
                  actions_file="registration_info.json",
                  states_file="estadosSMALL.json",
                  n_workers=1,
-                 task_config_path=None):
+                 task_config_path=None,
+                 ga_timeout=None):
         """
         Inicializa el problema de optimización de Q-table.
         
@@ -67,6 +68,9 @@ class QTableOptimizationProblem(Problem):
             task_config_path (str): Ruta al netsecenv_conf.yaml. Si se provee, el GA
                                     gestiona automáticamente N instancias de NetSecGame
                                     en puertos consecutivos (modo multi-servidor).
+            ga_timeout (int | None): Tiempo límite en segundos para toda la optimización.
+                                     Se usa para abortar evaluaciones individuales antes
+                                     de que pynisher dispare SIGKILL.
         """
         self.agent_script_path = agent_script_path
         self.host = host
@@ -77,6 +81,8 @@ class QTableOptimizationProblem(Problem):
         self.states_file = states_file
         self.n_workers = max(1, n_workers)
         self.task_config_path = task_config_path
+        self.ga_timeout = ga_timeout
+        self._ga_deadline = None    # Timestamp absoluto; lo fija start_servers()
         self._print_lock = threading.Lock()
         self._server_procs = None   # Servidores persistentes (ciclo de vida externo)
         self._port_pool = None      # Pool de puertos para workers
@@ -125,6 +131,7 @@ class QTableOptimizationProblem(Problem):
         state.pop('_print_lock', None)
         state.pop('_server_procs', None)
         state.pop('_port_pool', None)
+        state.pop('_ga_deadline', None)   # float; se recrea en start_servers()
         return state
 
     def __setstate__(self, state):
@@ -132,6 +139,7 @@ class QTableOptimizationProblem(Problem):
         self._print_lock = threading.Lock()
         self._server_procs = None
         self._port_pool = None
+        self._ga_deadline = None
         if 'task_config_path' not in state:
             self.task_config_path = None
 
@@ -309,6 +317,15 @@ class QTableOptimizationProblem(Problem):
         Debe llamarse antes de iniciar la optimización. Los servidores permanecen
         activos hasta que se llame a stop_servers().
         """
+        # Fijar el deadline absoluto para abortar evaluaciones a tiempo.
+        # Se hace aquí (antes de minimize()) para que el reloj comience en el
+        # mismo punto que pymoo, independientemente del modo de servidor.
+        if self.ga_timeout is not None:
+            self._ga_deadline = time.time() + self.ga_timeout
+            print(f"[GA deadline] Límite interno de evaluaciones: {self.ga_timeout}s "
+                  f"(se omitirán individuos restantes si queda <60 s).")
+        else:
+            self._ga_deadline = None
         if self.task_config_path is None:
             return
         n_servers = self.n_workers
@@ -336,7 +353,7 @@ class QTableOptimizationProblem(Problem):
             self._server_procs = None
             self._port_pool = None
 
-    def _evaluate_single(self, idx, x, total, port=None):
+    def _evaluate_single(self, idx, x, total, port=None, remaining_time=None):
         """
         Evalúa un único individuo de la población.
 
@@ -344,6 +361,8 @@ class QTableOptimizationProblem(Problem):
             idx (int): Índice del individuo
             x (np.ndarray): Parámetros del individuo
             total (int): Tamaño total de la población (para logging)
+            remaining_time (float | None): Segundos disponibles hasta el deadline;
+                                          se usa para acotar el timeout del subprocess.
 
         Returns:
             tuple: (idx, fitness)
@@ -357,7 +376,7 @@ class QTableOptimizationProblem(Problem):
             q_table_path = tmp_file.name
             pickle.dump(q_table_data, tmp_file)
             tmp_file.close()
-            fitness = self._run_agent_evaluation(q_table_path, port=port)
+            fitness = self._run_agent_evaluation(q_table_path, port=port, remaining_time=remaining_time)
             with self._print_lock:
                 print(f"  Individuo {idx + 1}/{total} -> Fitness: {fitness:.4f}")
             return idx, fitness
@@ -401,9 +420,17 @@ class QTableOptimizationProblem(Problem):
             n_servers = len(self._server_procs) if self._server_procs else self.n_workers
 
             def _worker_with_port(idx):
+                # Abortar inmediatamente si ya expiró el deadline
+                remaining = (self._ga_deadline - time.time()) if self._ga_deadline else None
+                if remaining is not None and remaining < 60:
+                    with self._print_lock:
+                        print(f"  [Deadline] Omitiendo individuo {idx + 1}/{total} "
+                              f"(solo {remaining:.0f}s restantes).")
+                    return idx, 1000.0
                 port = port_pool.get()
                 try:
-                    return self._evaluate_single(idx, X[idx], total, port=port)
+                    return self._evaluate_single(idx, X[idx], total, port=port,
+                                                 remaining_time=remaining)
                 finally:
                     port_pool.put(port)
 
@@ -422,22 +449,38 @@ class QTableOptimizationProblem(Problem):
             # Servidor externo: evaluación secuencial en self.port
             # --------------------------------------------------------
             for idx, x in enumerate(X):
-                _, fitness = self._evaluate_single(idx, x, total)
+                # Early-exit si el deadline se acerca (margen de 60 s)
+                remaining = (self._ga_deadline - time.time()) if self._ga_deadline else None
+                if remaining is not None and remaining < 60:
+                    with self._print_lock:
+                        print(f"  [Deadline] Solo {remaining:.0f}s restantes; "
+                              f"saltando individuos {idx + 1}–{total}.")
+                    for i in range(idx, total):
+                        objectives[i] = 1000.0
+                    break
+                _, fitness = self._evaluate_single(idx, x, total, remaining_time=remaining)
                 objectives[idx] = fitness
 
         out["F"] = np.array(objectives)
     
-    def _run_agent_evaluation(self, q_table_path, port=None):
+    def _run_agent_evaluation(self, q_table_path, port=None, remaining_time=None):
         """
         Ejecuta el agente con la Q-table proporcionada y extrae el fitness.
         
         Args:
             q_table_path (str): Ruta al archivo pickle con la Q-table
             port (int): Puerto del servidor a usar. None usa self.port.
+            remaining_time (float | None): Segundos disponibles hasta el deadline;
+                                          define el timeout máximo del subprocess.
             
         Returns:
             float: Fitness (menor es mejor). Usamos: -win_rate - avg_return/100
         """
+        # Calcular timeout dinámico: min(400 s, remaining_time - 15 s de margen)
+        if remaining_time is not None:
+            subprocess_timeout = max(30, min(400, int(remaining_time) - 15))
+        else:
+            subprocess_timeout = 400
         effective_port = port if port is not None else self.port
         # Comando para ejecutar el agente en modo testing
         cmd = [
@@ -457,7 +500,7 @@ class QTableOptimizationProblem(Problem):
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=400  # Timeout de 5 minutos
+                timeout=subprocess_timeout
             )
             
             # Parsear la salida para extraer métricas
@@ -523,7 +566,8 @@ class QTableGeneticOptimizer:
                  actions_file="registration_info.json",
                  states_file="estadosSMALL.json",
                  n_workers=1,
-                 task_config_path=None):
+                 task_config_path=None,
+                 ga_timeout=None):
         """
         Inicializa el optimizador.
         
@@ -538,6 +582,9 @@ class QTableGeneticOptimizer:
             n_workers (int): Número de workers paralelos (activo solo con task_config_path).
             task_config_path (str): Ruta al netsecenv_conf.yaml. Si se provee, el GA
                                     gestiona sus propias instancias de NetSecGame.
+            ga_timeout (int | None): Tiempo límite en segundos para la optimización.
+                                     Se propaga a QTableOptimizationProblem para abortar
+                                     evaluaciones individuales antes del SIGKILL de pynisher.
         """
         self.agent_script_path = agent_script_path
         self.host = host
@@ -548,6 +595,7 @@ class QTableGeneticOptimizer:
         self.states_file = states_file
         self.n_workers = n_workers
         self.task_config_path = task_config_path
+        self.ga_timeout = ga_timeout
         
         # Crear el problema de optimización
         self.problem = QTableOptimizationProblem(
@@ -559,7 +607,8 @@ class QTableGeneticOptimizer:
             actions_file=actions_file,
             states_file=states_file,
             n_workers=n_workers,
-            task_config_path=task_config_path
+            task_config_path=task_config_path,
+            ga_timeout=ga_timeout
         )
         
         self.best_q_table = None
@@ -975,7 +1024,8 @@ class SMACGAObjective:
                 actions_file=self.base_config['actions_file'],
                 states_file=self.base_config['states_file'],
                 n_workers=self.n_workers,
-                task_config_path=self.task_config_path
+                task_config_path=self.task_config_path,
+                ga_timeout=self.ga_timeout,
             )
             
             # Ejecutar optimización GA (con límites de tiempo si están configurados)
@@ -1087,9 +1137,16 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
         ga_timeout (int | None): Límite de tiempo en segundos para cada ejecución del GA
             dentro de un trial. La optimización se detiene al alcanzar n_generations o
             ga_timeout segundos (lo que ocurra primero). Por defecto None (sin límite).
-        trial_walltime_limit (float | None): Tiempo máximo en segundos permitido por trial.
-            Gestionado nativamente por SMAC3 mediante pynisher. Si el trial supera este
-            tiempo, SMAC lo penaliza y continúa con el siguiente. Por defecto None.
+            Si se omite pero trial_walltime_limit está definido, se deriva automáticamente
+            como int(trial_walltime_limit / n_workers * 0.80). CRÍTICO: pynisher acumula
+            CPU-time de los subprocesos hijo, así que con n_workers=4 el presupuesto de
+            wall-clock efectivo por trial es trial_walltime_limit / 4.
+        trial_walltime_limit (float | None): Tiempo máximo en segundos (CPU acumulado de
+            todos los hijos) permitido por trial. Gestionado por pynisher como red de
+            seguridad dura con SIGKILL. IMPORTANTE: con n_workers>1 el límite efectivo
+            de wall-clock es trial_walltime_limit / n_workers. Por eso ga_timeout se
+            auto-deriva dividiendo por n_workers y aplicando 80% de margen.
+            Por defecto None.
         walltime_limit (float | None): Tiempo máximo total en segundos para toda la
             ejecución de SMAC. Por defecto None (equivale a np.inf, sin límite).
         smac_overwrite (bool): Si True, borra la ejecución anterior de SMAC y comienza
@@ -1103,7 +1160,38 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     # Configurar logging
     log_file, logger = setup_smac_logging()
     print(f"SMAC logs guardados en: {log_file}\n")
-    
+
+    # ------------------------------------------------------------------
+    # Auto-derivar ga_timeout desde trial_walltime_limit cuando no se
+    # especificó explícitamente.
+    #
+    # PROBLEMA: pynisher acumula CPU-time de los procesos hijo.
+    # Con n_workers=4 corriendo en paralelo, cada segundo de wall-clock
+    # consume ~4 segundos de CPU. El límite efectivo de wall-clock es:
+    #
+    #   wall_efectivo ≈ trial_walltime_limit / n_workers
+    #
+    # Entonces ga_timeout debe derivarse dividiendo por n_workers:
+    #
+    #   ga_timeout = int(trial_walltime_limit / n_workers * 0.80)
+    #
+    # El 80% deja un margen de seguridad del 20% para que stop_servers()
+    # y _save_checkpoint() corran antes de que pynisher dispare SIGKILL.
+    # pynisher queda como red de seguridad dura absolutamente.
+    # ------------------------------------------------------------------
+    if ga_timeout is None and trial_walltime_limit is not None:
+        # Si n_workers > 1 cada worker consume CPU en paralelo,
+        # por lo que pynisher llega al límite n_workers veces más rápido.
+        effective_wall = trial_walltime_limit / max(1, n_workers)
+        ga_timeout = int(effective_wall * 0.80)
+        print(
+            f"[Auto ga_timeout] trial_walltime_limit={trial_walltime_limit}s, "
+            f"n_workers={n_workers} → ga_timeout derivado = {ga_timeout}s\n"
+            f"  (wall efectivo ≈ {effective_wall:.0f}s × 80% de margen).\n"
+            f"  Esto garantiza que el GA pare de forma ordenada antes de que "
+            f"pynisher acumule el CPU-budget y mate el proceso.\n"
+        )
+
     # Inyectar opciones de ejecución en la configuración base
     base_config = {**base_config, 'n_workers': n_workers, 'ga_timeout': ga_timeout}
 
@@ -1155,9 +1243,11 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
     if resuming:
         print(f"Trials ya completados (cargados): {len(objective.results_history)}")
     if ga_timeout is not None:
-        print(f"Límite por GA (ga_timeout): {ga_timeout}s")
+        print(f"Límite por GA (ga_timeout): {ga_timeout}s  [pymoo ordena detención; resultados siempre guardados]")
     if trial_walltime_limit is not None:
-        print(f"Límite por trial (trial_walltime_limit): {trial_walltime_limit}s  [SMAC/pynisher nativo]")
+        eff = trial_walltime_limit / max(1, n_workers)
+        print(f"Límite por trial (trial_walltime_limit): {trial_walltime_limit}s  [pynisher CPU acumulado]")
+        print(f"  → Wall efectivo por trial (con {n_workers} worker(s)): ~{eff:.0f}s")
     if walltime_limit is not None:
         print(f"Límite total SMAC (walltime_limit): {walltime_limit}s")
     if smac_overwrite:
