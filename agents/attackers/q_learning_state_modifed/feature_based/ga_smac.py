@@ -1283,25 +1283,53 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
         overwrite=smac_overwrite or not resuming,
     )
     
+    # ----------------------------------------------------------------
+    # Helper: recarga el estado del objetivo desde el checkpoint.
+    # Necesario porque pynisher (trial_walltime_limit) ejecuta cada
+    # train() en un subproceso: self es una copia pickled del padre y
+    # las mutaciones (results_history, trial_count, …) nunca se
+    # propagan de vuelta. El checkpoint es el único estado compartido.
+    # ----------------------------------------------------------------
+    def _reload_objective_from_checkpoint():
+        if objective.checkpoint_file and os.path.isfile(objective.checkpoint_file):
+            try:
+                with open(objective.checkpoint_file, 'r', encoding='utf-8') as _f:
+                    _ckpt = json.load(_f)
+                objective.trial_count      = _ckpt.get('trial_count',      objective.trial_count)
+                objective.best_win_rate    = _ckpt.get('best_win_rate',    objective.best_win_rate)
+                objective.best_trial       = _ckpt.get('best_trial',       objective.best_trial)
+                objective.results_history  = _ckpt.get('results_history',  objective.results_history)
+                print(f"[Checkpoint] Estado recargado: {len(objective.results_history)} trial(s), "
+                      f"mejor win_rate = {objective.best_win_rate:.2f}%")
+            except Exception as _e:
+                print(f"[Checkpoint] Advertencia al recargar estado: {_e}")
+
     # Ejecutar optimización
     try:
         incumbent = smac.optimize()
     except KeyboardInterrupt:
+        _reload_objective_from_checkpoint()
         objective.execution_state = "detenido"
         objective._save_checkpoint()
         print("\n[Estado] Optimización DETENIDA por el usuario. Checkpoint guardado.")
         raise
     except Exception as _exc:
+        _reload_objective_from_checkpoint()
         objective.execution_state = "detenido"
         objective._save_checkpoint()
         print(f"\n[Estado] Optimización DETENIDA por error: {_exc}. Checkpoint guardado.")
         raise
 
+    # Recargar estado desde checkpoint antes de usarlo: los trials se
+    # ejecutaron en subprocesos (pynisher) y sus cambios solo existen
+    # en el archivo de checkpoint, no en el objeto padre en memoria.
+    _reload_objective_from_checkpoint()
+
     # Validar la configuración incumbente
     incumbent_cost = smac.validate(incumbent)
     incumbent_win_rate = 100.0 * (1.0 - incumbent_cost)
 
-    # Marcar como finalizado y persistir
+    # Marcar como finalizado y persistir (ahora objective tiene el estado real)
     objective.execution_state = "finalizado"
     objective._save_checkpoint()
     
