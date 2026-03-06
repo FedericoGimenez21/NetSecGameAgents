@@ -284,16 +284,33 @@ class QTableOptimizationProblem(Problem):
         return server_procs
 
     def _stop_game_servers(self, server_procs):
-        """Termina todas las instancias del coordinator lanzadas por este proceso."""
+        """Termina todas las instancias del coordinator lanzadas por este proceso.
+
+        Se envía SIGTERM a todos los servidores simultáneamente y luego se
+        espera hasta 8 segundos en total (wall-clock, no por proceso) antes
+        de forzar SIGKILL. Esto garantiza que stop_servers() complete en
+        tiempo constante (~8 s) independientemente de n_workers.
+        """
+        # 1. Enviar SIGTERM a todos de forma inmediata (no bloquea)
         for port, proc in server_procs.items():
             try:
                 proc.terminate()
-                proc.wait(timeout=15)
+            except Exception:
+                pass
+
+        # 2. Esperar hasta 8 s en total a que todos finalicen
+        deadline = time.time() + 8
+        for port, proc in server_procs.items():
+            remaining = max(0.0, deadline - time.time())
+            try:
+                proc.wait(timeout=remaining)
                 with self._print_lock:
                     print(f"  [Servidor] Puerto {port} detenido.")
             except Exception:
+                # Tiempo agotado → SIGKILL
                 try:
                     proc.kill()
+                    proc.wait(timeout=2)
                 except Exception:
                     pass
 
@@ -453,9 +470,15 @@ class QTableOptimizationProblem(Problem):
             # Servidor externo: evaluación secuencial en self.port
             # --------------------------------------------------------
             for idx, x in enumerate(X):
-                # Early-exit si el deadline se acerca (margen de 60 s)
+                # Early-exit si el deadline se acerca.
+                # En modo secuencial no hay servidores gestionados, pero
+                # mantenemos el mismo margen conservador (60s) para que
+                # el único subprocess en curso tenga tiempo de terminar
+                # (subprocess_timeout = remaining-15) y se pueda hacer
+                # checkpoint y return antes del SIGKILL de pynisher.
+                _safety = 60
                 remaining = (self._ga_deadline - time.time()) if self._ga_deadline else None
-                if remaining is not None and remaining < 60:
+                if remaining is not None and remaining < _safety:
                     self._deadline_triggered = True
                     with self._print_lock:
                         print(f"  [Deadline] Solo {remaining:.0f}s restantes; "
