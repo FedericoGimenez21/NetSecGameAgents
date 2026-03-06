@@ -82,7 +82,8 @@ class QTableOptimizationProblem(Problem):
         self.n_workers = max(1, n_workers)
         self.task_config_path = task_config_path
         self.ga_timeout = ga_timeout
-        self._ga_deadline = None    # Timestamp absoluto; lo fija start_servers()
+        self._ga_deadline = None          # Timestamp absoluto; lo fija start_servers()
+        self._deadline_triggered = False  # True si el GA abortó individuos por deadline
         self._print_lock = threading.Lock()
         self._server_procs = None   # Servidores persistentes (ciclo de vida externo)
         self._port_pool = None      # Pool de puertos para workers
@@ -140,6 +141,7 @@ class QTableOptimizationProblem(Problem):
         self._server_procs = None
         self._port_pool = None
         self._ga_deadline = None
+        self._deadline_triggered = False
         if 'task_config_path' not in state:
             self.task_config_path = None
 
@@ -326,6 +328,7 @@ class QTableOptimizationProblem(Problem):
                   f"(se omitirán individuos restantes si queda <60 s).")
         else:
             self._ga_deadline = None
+        self._deadline_triggered = False  # Reiniciar para este trial
         if self.task_config_path is None:
             return
         n_servers = self.n_workers
@@ -423,6 +426,7 @@ class QTableOptimizationProblem(Problem):
                 # Abortar inmediatamente si ya expiró el deadline
                 remaining = (self._ga_deadline - time.time()) if self._ga_deadline else None
                 if remaining is not None and remaining < 60:
+                    self._deadline_triggered = True
                     with self._print_lock:
                         print(f"  [Deadline] Omitiendo individuo {idx + 1}/{total} "
                               f"(solo {remaining:.0f}s restantes).")
@@ -452,6 +456,7 @@ class QTableOptimizationProblem(Problem):
                 # Early-exit si el deadline se acerca (margen de 60 s)
                 remaining = (self._ga_deadline - time.time()) if self._ga_deadline else None
                 if remaining is not None and remaining < 60:
+                    self._deadline_triggered = True
                     with self._print_lock:
                         print(f"  [Deadline] Solo {remaining:.0f}s restantes; "
                               f"saltando individuos {idx + 1}–{total}.")
@@ -1050,13 +1055,22 @@ class SMACGAObjective:
             # SMAC minimiza, así que devolvemos (100 - win_rate) / 100
             # De esta forma: win_rate=100% -> cost=0.0, win_rate=0% -> cost=1.0
             cost = (100.0 - best_win_rate) / 100.0
-            
+
+            # Determinar razón de terminación:
+            # 'ga_timeout' si el deadline interno abortó individuos (el GA terminó
+            # antes de completar todas las generaciones por tiempo),
+            # 'success' si completó normalmente.
+            termination_reason = (
+                'ga_timeout' if optimizer.problem._deadline_triggered else 'success'
+            )
+
             # Registrar resultado
             self.results_history.append({
                 'trial': trial_num,
                 'win_rate': best_win_rate,
                 'cost': cost,
                 'config': dict(config),
+                'termination_reason': termination_reason,
             })
             
             # Guardar Q-table si es el mejor resultado
@@ -1067,12 +1081,24 @@ class SMACGAObjective:
                 optimizer.save_q_table(output_file)
                 print(f"  -> Nuevo mejor resultado! Q-table guardada en: {output_file}")
             
-            print(f"\nTrial {trial_num} completado: win_rate = {best_win_rate:.2f}%, cost = {cost:.4f}\n")
+            print(f"\nTrial {trial_num} completado: win_rate = {best_win_rate:.2f}%, cost = {cost:.4f} [termination_reason={termination_reason}]\n")
             self._save_checkpoint()
             return cost
             
         except Exception as e:
-            print(f"\nError en trial {trial_num}: {e}\n")
+            # Detectar si el trial fue abortado por pynisher (trial_walltime_limit).
+            # pynisher puede lanzar WallTimeoutException (distintas rutas de importación
+            # según la versión), así que se comprueba por nombre de clase como fallback.
+            exc_type_name = type(e).__name__
+            exc_module    = getattr(type(e), '__module__', '') or ''
+            is_walltime = (
+                'WallTimeout' in exc_type_name
+                or 'WallTimeout' in exc_module
+                or 'TAEAbortException' in exc_type_name   # versiones antiguas de SMAC
+            )
+            termination_reason = 'walltime_timeout' if is_walltime else 'error'
+
+            print(f"\nError en trial {trial_num} [{termination_reason}]: {e}\n")
             import traceback
             traceback.print_exc()
             # Registrar el trial fallido con penalización para que SMAC lo tenga en cuenta
@@ -1081,6 +1107,7 @@ class SMACGAObjective:
                 'win_rate': 0.0,
                 'cost': 1.0,
                 'config': dict(config),
+                'termination_reason': termination_reason,
                 'error': str(e),
             })
             self._save_checkpoint()
