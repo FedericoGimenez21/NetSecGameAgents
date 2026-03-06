@@ -1337,433 +1337,402 @@ def optimize_with_smac(base_config, n_trials=20, output_dir="smac_output", n_wor
 def plot_smac_results(objective, save_dir="smac_plots"):
     """
     Genera visualizaciones de los resultados de SMAC.
-    
+
+    Los plots se generan en tres subdirectorios:
+      - combined/   : trials con termination_reason 'success' o 'ga_timeout'
+      - success/    : solo trials con termination_reason 'success'
+      - ga_timeout/ : solo trials con termination_reason 'ga_timeout'
+
     Args:
         objective: Instancia de SMACGAObjective con el historial
-        save_dir: Directorio donde guardar las gráficas
+        save_dir: Directorio raíz donde guardar las gráficas
     """
     os.makedirs(save_dir, exist_ok=True)
-    
+
     if not objective.results_history:
         print("No hay historial de resultados para graficar.")
         return
+
+    # ----------------------------------------------------------------
+    # Subconjuntos por termination_reason
+    # ----------------------------------------------------------------
+    valid_reasons = {'success', 'ga_timeout'}
+    combined_records  = [r for r in objective.results_history
+                         if r.get('termination_reason', 'success') in valid_reasons]
+    success_records   = [r for r in objective.results_history
+                         if r.get('termination_reason', 'success') == 'success']
+    ga_timeout_records = [r for r in objective.results_history
+                          if r.get('termination_reason', 'success') == 'ga_timeout']
+
+    subsets = [
+        (combined_records,   os.path.join(save_dir, 'combined'),   'Combined (success + ga_timeout)'),
+        (success_records,    os.path.join(save_dir, 'success'),    'Success only'),
+        (ga_timeout_records, os.path.join(save_dir, 'ga_timeout'), 'GA-timeout only'),
+    ]
+
+    hyperparams = ['population_size', 'n_generations', 'sbx_prob', 'sbx_eta', 'pm_prob_var', 'pm_eta']
+    hyperparam_labels = {
+        'population_size': 'Population Size',
+        'n_generations':   'Number of Generations',
+        'sbx_prob':        'SBX Probability',
+        'sbx_eta':         'SBX Eta',
+        'pm_prob_var':     'PM Prob Var',
+        'pm_eta':          'PM Eta',
+    }
+
+    # ----------------------------------------------------------------
+    # Helper: genera todos los plots para un subconjunto de resultados
+    # ----------------------------------------------------------------
+    def _plot_subset(records, sub_dir, label):
+        if not records:
+            print(f"  [{label}] Sin datos, se omite.")
+            return
+
+        os.makedirs(sub_dir, exist_ok=True)
+        n = len(records)
+        trials    = [r['trial']    for r in records]
+        win_rates = [r['win_rate'] for r in records]
+        costs     = [r['cost']     for r in records]
+
+        print(f"\n[{label}] Generando plots ({n} trials) en: {sub_dir}/")
+
+        # Calcular mejor acumulado (para referencia interna; no se usa en todos los plots)
+        best_so_far = []
+        current_best = 0.0
+        for wr in win_rates:
+            current_best = max(current_best, wr)
+            best_so_far.append(current_best)
     
-    trials = [r['trial'] for r in objective.results_history]
-    win_rates = [r['win_rate'] for r in objective.results_history]
-    costs = [r['cost'] for r in objective.results_history]
-    
-    # Calcular mejor acumulado
-    best_so_far = []
-    current_best = 0.0
-    for wr in win_rates:
-        current_best = max(current_best, wr)
-        best_so_far.append(current_best)
-    
-    # ================================================================
-    # 1. Win rate por trial
-    # ================================================================
-    plt.figure(figsize=(10, 6))
-    plt.plot(trials, win_rates, 'o-', color='steelblue', linewidth=2, markersize=5, label='Win Rate')
-    plt.title('Win Rate por Trial (SMAC)', fontsize=13, fontweight='bold')
-    plt.xlabel('Trial')
-    plt.ylabel('Win Rate (%)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    plot_path_1 = os.path.join(save_dir, "smac_win_rate_per_trial.png")
-    plt.savefig(plot_path_1, dpi=300, bbox_inches='tight')
-    print(f"Gráfica guardada: {plot_path_1}")
-    plt.close()
-    
-    # ================================================================
-    # 2. Costo por trial
-    # ================================================================
-    plt.figure(figsize=(10, 6))
-    plt.plot(trials, costs, 'o-', color='darkorange', linewidth=2, markersize=5)
-    plt.title('Costo (SMAC minimiza) por Trial', fontsize=13, fontweight='bold')
-    plt.xlabel('Trial')
-    plt.ylabel('Costo')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    plot_path_2 = os.path.join(save_dir, "smac_cost_per_trial.png")
-    plt.savefig(plot_path_2, dpi=300, bbox_inches='tight')
-    print(f"Gráfica guardada: {plot_path_2}")
-    plt.close()
-    
-    # ================================================================
-    # 3. Distribución de win rates
-    # ================================================================
-    plt.figure(figsize=(10, 6))
-    plt.hist(win_rates, bins=max(5, len(win_rates)//3), color='mediumseagreen', 
-             alpha=0.7, edgecolor='black')
-    plt.axvline(max(win_rates), color='red', linestyle='--', linewidth=2, label=f'Mejor: {max(win_rates):.1f}%')
-    plt.title('Distribución de Win Rates', fontsize=13, fontweight='bold')
-    plt.xlabel('Win Rate (%)')
-    plt.ylabel('Frecuencia')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    plot_path_3 = os.path.join(save_dir, "smac_win_rate_distribution.png")
-    plt.savefig(plot_path_3, dpi=300, bbox_inches='tight')
-    print(f"Gráfica guardada: {plot_path_3}")
-    plt.close()
-    
-    # ================================================================
-    # 4. Hiperparámetros vs win_rate (scatter pm_prob_var vs sbx_prob)
-    # ================================================================
-    if objective.results_history:
+        # ================================================================
+        # 1. Win rate por trial
+        # ================================================================
         plt.figure(figsize=(10, 6))
-        pm_prob_vars = [r['config'].get('pm_prob_var', 0) for r in objective.results_history]
-        sbx_probs = [r['config'].get('sbx_prob', 0) for r in objective.results_history]
-        scatter = plt.scatter(pm_prob_vars, sbx_probs, c=win_rates, 
-                            cmap='RdYlGn', s=80, edgecolors='black', linewidths=0.5)
-        plt.title('PM prob_var vs SBX prob (color=Win Rate)', fontsize=13, fontweight='bold')
+        plt.plot(trials, win_rates, 'o-', color='steelblue', linewidth=2, markersize=5, label='Win Rate')
+        plt.plot(trials, best_so_far, '--', color='red', linewidth=1.5, alpha=0.7, label='Mejor acumulado')
+        plt.title(f'Win Rate por Trial (SMAC) — {label}', fontsize=13, fontweight='bold')
+        plt.xlabel('Trial')
+        plt.ylabel('Win Rate (%)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plot_path_1 = os.path.join(sub_dir, "smac_win_rate_per_trial.png")
+        plt.savefig(plot_path_1, dpi=300, bbox_inches='tight')
+        print(f"  Gráfica guardada: {plot_path_1}")
+        plt.close()
+
+        # ================================================================
+        # 2. Costo por trial
+        # ================================================================
+        plt.figure(figsize=(10, 6))
+        plt.plot(trials, costs, 'o-', color='darkorange', linewidth=2, markersize=5)
+        plt.title(f'Costo (SMAC minimiza) por Trial — {label}', fontsize=13, fontweight='bold')
+        plt.xlabel('Trial')
+        plt.ylabel('Costo')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plot_path_2 = os.path.join(sub_dir, "smac_cost_per_trial.png")
+        plt.savefig(plot_path_2, dpi=300, bbox_inches='tight')
+        print(f"  Gráfica guardada: {plot_path_2}")
+        plt.close()
+
+        # ================================================================
+        # 3. Distribución de win rates
+        # ================================================================
+        plt.figure(figsize=(10, 6))
+        plt.hist(win_rates, bins=max(5, n // 3), color='mediumseagreen',
+                 alpha=0.7, edgecolor='black')
+        plt.axvline(max(win_rates), color='red', linestyle='--', linewidth=2,
+                    label=f'Mejor: {max(win_rates):.1f}%')
+        plt.title(f'Distribución de Win Rates — {label}', fontsize=13, fontweight='bold')
+        plt.xlabel('Win Rate (%)')
+        plt.ylabel('Frecuencia')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plot_path_3 = os.path.join(sub_dir, "smac_win_rate_distribution.png")
+        plt.savefig(plot_path_3, dpi=300, bbox_inches='tight')
+        print(f"  Gráfica guardada: {plot_path_3}")
+        plt.close()
+
+        # ================================================================
+        # 4. Scatter PM_prob_var vs SBX_prob (color = win_rate)
+        # ================================================================
+        plt.figure(figsize=(10, 6))
+        pm_prob_vars = [r['config'].get('pm_prob_var', 0) for r in records]
+        sbx_probs    = [r['config'].get('sbx_prob', 0)    for r in records]
+        scatter = plt.scatter(pm_prob_vars, sbx_probs, c=win_rates,
+                              cmap='RdYlGn', s=80, edgecolors='black', linewidths=0.5)
+        plt.title(f'PM prob_var vs SBX prob (color=Win Rate) — {label}',
+                  fontsize=13, fontweight='bold')
         plt.xlabel('PM prob_var')
         plt.ylabel('SBX prob')
         plt.colorbar(scatter, label='Win Rate (%)')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        
-        plot_path_4 = os.path.join(save_dir, "smac_hyperparameters_vs_winrate.png")
+        plot_path_4 = os.path.join(sub_dir, "smac_hyperparameters_vs_winrate.png")
         plt.savefig(plot_path_4, dpi=300, bbox_inches='tight')
-        print(f"Gráfica guardada: {plot_path_4}")
+        print(f"  Gráfica guardada: {plot_path_4}")
         plt.close()
-    
-    # ================================================================
-    # 5. Análisis individual de cada hiperparámetro vs win_rate
-    # ================================================================
-    hyperparams = ['population_size', 'n_generations', 'sbx_prob', 'sbx_eta', 'pm_prob_var', 'pm_eta']
-    hyperparam_labels = {
-        'population_size': 'Population Size',
-        'n_generations': 'Number of Generations',
-        'sbx_prob': 'SBX Probability',
-        'sbx_eta': 'SBX Eta',
-        'pm_prob_var': 'PM Prob Var',
-        'pm_eta': 'PM Eta'
-    }
-    
-    for param in hyperparams:
-        plt.figure(figsize=(10, 6))
-        param_values = [r['config'].get(param, 0) for r in objective.results_history]
-        
-        # Crear scatter plot con línea de tendencia
-        plt.scatter(param_values, win_rates, c=win_rates, cmap='RdYlGn', 
-                   s=100, alpha=0.6, edgecolors='black', linewidths=0.5)
-        
-        # Añadir línea de tendencia si hay suficientes datos
-        if len(param_values) > 2:
-            z = np.polyfit(param_values, win_rates, 1)
-            p = np.poly1d(z)
-            x_trend = np.linspace(min(param_values), max(param_values), 100)
-            plt.plot(x_trend, p(x_trend), "r--", alpha=0.8, linewidth=2, label='Tendencia')
-        
-        plt.title(f'{hyperparam_labels[param]} vs Win Rate', fontsize=13, fontweight='bold')
-        plt.xlabel(hyperparam_labels[param])
-        plt.ylabel('Win Rate (%)')
-        plt.colorbar(label='Win Rate (%)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        
-        plot_path_param = os.path.join(save_dir, f"smac_{param}_vs_winrate.png")
-        plt.savefig(plot_path_param, dpi=300, bbox_inches='tight')
-        print(f"Gráfica guardada: {plot_path_param}")
-        plt.close()
-    
-    # ================================================================
-    # 6. Correlación entre hiperparámetros y win_rate
-    # ================================================================
-    plt.figure(figsize=(10, 8))
-    
-    # Preparar datos para correlación
-    data_for_corr = []
-    for r in objective.results_history:
-        row = [r['win_rate']]
+
+        # ================================================================
+        # 5. Análisis individual de cada hiperparámetro vs win_rate
+        # ================================================================
         for param in hyperparams:
-            row.append(r['config'].get(param, 0))
-        data_for_corr.append(row)
-    
-    data_array = np.array(data_for_corr)
-    
-    # Calcular matriz de correlación
-    corr_matrix = np.corrcoef(data_array.T)
-    
-    # Crear heatmap
-    im = plt.imshow(corr_matrix, cmap='coolwarm', aspect='auto', vmin=-1, vmax=1)
-    
-    # Configurar etiquetas
-    labels = ['Win Rate'] + [hyperparam_labels[p] for p in hyperparams]
-    plt.xticks(range(len(labels)), labels, rotation=45, ha='right')
-    plt.yticks(range(len(labels)), labels)
-    
-    # Añadir valores de correlación en las celdas
-    for i in range(len(labels)):
-        for j in range(len(labels)):
-            text = plt.text(j, i, f'{corr_matrix[i, j]:.2f}',
-                          ha="center", va="center", color="black", fontsize=9)
-    
-    plt.colorbar(im, label='Correlación')
-    plt.title('Matriz de Correlación: Hiperparámetros vs Win Rate', fontsize=13, fontweight='bold')
-    plt.tight_layout()
-    
-    plot_path_corr = os.path.join(save_dir, "smac_correlation_matrix.png")
-    plt.savefig(plot_path_corr, dpi=300, bbox_inches='tight')
-    print(f"Gráfica guardada: {plot_path_corr}")
-    plt.close()
-    
-    # ================================================================
-    # 7. Evolución de hiperparámetros de los mejores trials
-    # ================================================================
-    # Ordenar por win_rate y tomar top 5
-    top_trials = sorted(objective.results_history, key=lambda x: x['win_rate'], reverse=True)[:min(5, len(objective.results_history))]
-    
-    if len(top_trials) > 1:
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        axes = axes.flatten()
-        
-        for idx, param in enumerate(hyperparams):
-            ax = axes[idx]
-            
-            # Valores para todos los trials
-            all_values = [r['config'].get(param, 0) for r in objective.results_history]
-            all_trials_num = [r['trial'] for r in objective.results_history]
-            
-            # Valores para top trials
-            top_values = [r['config'].get(param, 0) for r in top_trials]
-            top_trials_num = [r['trial'] for r in top_trials]
-            top_winrates = [r['win_rate'] for r in top_trials]
-            
-            # Scatter de todos los trials
-            ax.scatter(all_trials_num, all_values, c='lightgray', s=50, alpha=0.5, label='Todos')
-            
-            # Destacar top trials
-            scatter = ax.scatter(top_trials_num, top_values, c=top_winrates, 
-                               cmap='RdYlGn', s=150, edgecolors='black', 
-                               linewidths=1.5, label='Top 5', zorder=5)
-            
-            ax.set_title(hyperparam_labels[param], fontsize=11, fontweight='bold')
-            ax.set_xlabel('Trial')
-            ax.set_ylabel(hyperparam_labels[param])
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plot_path_evolution = os.path.join(save_dir, "smac_hyperparams_evolution.png")
-        plt.savefig(plot_path_evolution, dpi=300, bbox_inches='tight')
-        print(f"Gráfica guardada: {plot_path_evolution}")
-        plt.close()
-    
-    # ================================================================
-    # 8. Box plots de win_rate por rangos de hiperparámetros (un archivo por param)
-    # ================================================================
-    n_trials_total = len(objective.results_history)
-    from matplotlib.lines import Line2D
+            plt.figure(figsize=(10, 6))
+            param_values = [r['config'].get(param, 0) for r in records]
+            sc = plt.scatter(param_values, win_rates, c=win_rates, cmap='RdYlGn',
+                             s=100, alpha=0.6, edgecolors='black', linewidths=0.5)
+            if len(param_values) > 2:
+                z = np.polyfit(param_values, win_rates, 1)
+                p_fn = np.poly1d(z)
+                x_trend = np.linspace(min(param_values), max(param_values), 100)
+                plt.plot(x_trend, p_fn(x_trend), "r--", alpha=0.8, linewidth=2, label='Tendencia')
+            plt.title(f'{hyperparam_labels[param]} vs Win Rate — {label}',
+                      fontsize=13, fontweight='bold')
+            plt.xlabel(hyperparam_labels[param])
+            plt.ylabel('Win Rate (%)')
+            plt.colorbar(sc, label='Win Rate (%)')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plot_path_param = os.path.join(sub_dir, f"smac_{param}_vs_winrate.png")
+            plt.savefig(plot_path_param, dpi=300, bbox_inches='tight')
+            print(f"  Gráfica guardada: {plot_path_param}")
+            plt.close()
 
-    # Número de bins adaptativo según cantidad de trials
-    if n_trials_total < 20:
-        n_bins = 4
-    elif n_trials_total < 50:
-        n_bins = 5
-    elif n_trials_total < 100:
-        n_bins = 6
-    else:
-        n_bins = 8
+        # ================================================================
+        # 6. Correlación entre hiperparámetros y win_rate
+        # ================================================================
+        if n >= 3:
+            plt.figure(figsize=(10, 8))
+            data_for_corr = []
+            for r in records:
+                row = [r['win_rate']] + [r['config'].get(p, 0) for p in hyperparams]
+                data_for_corr.append(row)
+            data_array  = np.array(data_for_corr)
+            corr_matrix = np.corrcoef(data_array.T)
+            im = plt.imshow(corr_matrix, cmap='coolwarm', aspect='auto', vmin=-1, vmax=1)
+            labels_corr = ['Win Rate'] + [hyperparam_labels[p] for p in hyperparams]
+            plt.xticks(range(len(labels_corr)), labels_corr, rotation=45, ha='right')
+            plt.yticks(range(len(labels_corr)), labels_corr)
+            for i in range(len(labels_corr)):
+                for j in range(len(labels_corr)):
+                    plt.text(j, i, f'{corr_matrix[i, j]:.2f}',
+                             ha="center", va="center", color="black", fontsize=9)
+            plt.colorbar(im, label='Correlación')
+            plt.title(f'Matriz de Correlación: Hiperparámetros vs Win Rate — {label}',
+                      fontsize=13, fontweight='bold')
+            plt.tight_layout()
+            plot_path_corr = os.path.join(sub_dir, "smac_correlation_matrix.png")
+            plt.savefig(plot_path_corr, dpi=300, bbox_inches='tight')
+            print(f"  Gráfica guardada: {plot_path_corr}")
+            plt.close()
 
-    use_notch  = (n_trials_total >= 40)
-    show_points = (n_trials_total <= 200)
+        # ================================================================
+        # 7. Evolución de hiperparámetros de los mejores trials
+        # ================================================================
+        top_trials = sorted(records, key=lambda x: x['win_rate'], reverse=True)[:min(5, n)]
+        if len(top_trials) > 1:
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            axes = axes.flatten()
+            for idx, param in enumerate(hyperparams):
+                ax = axes[idx]
+                all_values      = [r['config'].get(param, 0) for r in records]
+                all_trials_num  = [r['trial'] for r in records]
+                top_values      = [r['config'].get(param, 0) for r in top_trials]
+                top_trials_num  = [r['trial'] for r in top_trials]
+                top_winrates    = [r['win_rate'] for r in top_trials]
+                ax.scatter(all_trials_num, all_values, c='lightgray', s=50, alpha=0.5, label='Todos')
+                sc2 = ax.scatter(top_trials_num, top_values, c=top_winrates,
+                                 cmap='RdYlGn', s=150, edgecolors='black',
+                                 linewidths=1.5, label='Top 5', zorder=5)
+                ax.set_title(hyperparam_labels[param], fontsize=11, fontweight='bold')
+                ax.set_xlabel('Trial')
+                ax.set_ylabel(hyperparam_labels[param])
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+            plt.suptitle(f'Evolución de Hiperparámetros — {label}', fontsize=13, fontweight='bold')
+            plt.tight_layout()
+            plot_path_evolution = os.path.join(sub_dir, "smac_hyperparams_evolution.png")
+            plt.savefig(plot_path_evolution, dpi=300, bbox_inches='tight')
+            print(f"  Gráfica guardada: {plot_path_evolution}")
+            plt.close()
 
-    plot_paths_boxplots = []
-
-    for param in hyperparams:
-        param_values  = np.array([r['config'].get(param, 0) for r in objective.results_history])
+        # ================================================================
+        # 8. Box plots de win_rate por rangos de hiperparámetros
+        # ================================================================
+        from matplotlib.lines import Line2D
+        if n < 20:
+            n_bins = 4
+        elif n < 50:
+            n_bins = 5
+        elif n < 100:
+            n_bins = 6
+        else:
+            n_bins = 8
+        use_notch   = (n >= 40)
+        show_points = (n <= 200)
         win_rates_arr = np.array(win_rates)
 
-        fig, ax = plt.subplots(figsize=(10, 6))
+        for param in hyperparams:
+            param_values = np.array([r['config'].get(param, 0) for r in records])
+            fig, ax = plt.subplots(figsize=(10, 6))
+            if len(set(param_values)) > 1:
+                percentile_edges = np.linspace(0, 100, n_bins + 1)
+                bin_edges   = np.unique(np.percentile(param_values, percentile_edges))
+                actual_bins = len(bin_edges) - 1
+                groups_data    = []
+                groups_labels  = []
+                groups_medians = []
+                for b in range(actual_bins):
+                    lo, hi_b = bin_edges[b], bin_edges[b + 1]
+                    mask = ((param_values >= lo) & (param_values <= hi_b)
+                            if b == actual_bins - 1
+                            else (param_values >= lo) & (param_values < hi_b))
+                    group_wr = win_rates_arr[mask]
+                    if len(group_wr) == 0:
+                        continue
+                    groups_data.append(group_wr)
+                    lbl = f'{lo:.3g}' if lo == hi_b else f'[{lo:.3g}, {hi_b:.3g}]'
+                    groups_labels.append(f'{lbl}\n(n={len(group_wr)})')
+                    groups_medians.append(np.median(group_wr))
+                if groups_data:
+                    cmap_bp = plt.cm.RdYlGn
+                    med_min, med_max = min(groups_medians), max(groups_medians)
+                    med_range = med_max - med_min if med_max != med_min else 1.0
+                    box_colors = [cmap_bp((m - med_min) / med_range) for m in groups_medians]
+                    bp = ax.boxplot(
+                        groups_data, labels=groups_labels, patch_artist=True,
+                        notch=use_notch and all(len(g) >= 5 for g in groups_data),
+                        showmeans=True,
+                        meanprops=dict(marker='D', markerfacecolor='navy',
+                                       markeredgecolor='navy', markersize=6),
+                        medianprops=dict(color='black', linewidth=2),
+                        flierprops=dict(marker='o', markersize=3, alpha=0.4,
+                                        markerfacecolor='gray'),
+                    )
+                    for patch, color in zip(bp['boxes'], box_colors):
+                        patch.set_facecolor(color)
+                        patch.set_alpha(0.75)
+                    if show_points:
+                        rng = np.random.default_rng(seed=42)
+                        for i, group_wr in enumerate(groups_data, start=1):
+                            jitter = rng.uniform(-0.18, 0.18, size=len(group_wr))
+                            ax.scatter(np.full(len(group_wr), i) + jitter, group_wr,
+                                       alpha=0.35, s=14, color='steelblue', zorder=3)
+            ax.set_title(
+                f'{hyperparam_labels[param]} vs Win Rate — {label}\n'
+                f'({n} trials · {n_bins} bins por percentil)',
+                fontsize=13, fontweight='bold')
+            ax.set_xlabel(hyperparam_labels[param], fontsize=11)
+            ax.set_ylabel('Win Rate (%)', fontsize=11)
+            ax.tick_params(axis='x', labelsize=9)
+            ax.grid(True, alpha=0.3, axis='y')
+            legend_elements = [
+                Line2D([0], [0], marker='D', color='w', markerfacecolor='navy',
+                       markersize=7, label='Media'),
+                Line2D([0], [0], color='black', linewidth=2, label='Mediana'),
+            ]
+            ax.legend(handles=legend_elements, fontsize=9, loc='upper right')
+            plt.tight_layout()
+            plot_path_bp = os.path.join(sub_dir, f"smac_boxplot_{param}.png")
+            plt.savefig(plot_path_bp, dpi=300, bbox_inches='tight')
+            print(f"  Gráfica guardada: {plot_path_bp}")
+            plt.close()
 
-        if len(set(param_values)) > 1:
-            # Bins por percentiles equiespaciados → cada bin ≈ mismo nº de trials
-            percentile_edges = np.linspace(0, 100, n_bins + 1)
-            bin_edges = np.unique(np.percentile(param_values, percentile_edges))
-            actual_bins = len(bin_edges) - 1
-
-            groups_data    = []
-            groups_labels  = []
-            groups_medians = []
-
-            for b in range(actual_bins):
-                lo, hi = bin_edges[b], bin_edges[b + 1]
-                mask = (param_values >= lo) & (param_values <= hi) \
-                       if b == actual_bins - 1 \
-                       else (param_values >= lo) & (param_values < hi)
-                group_wr = win_rates_arr[mask]
-                if len(group_wr) == 0:
-                    continue
-                groups_data.append(group_wr)
-                lbl = f'{lo:.3g}' if lo == hi else f'[{lo:.3g}, {hi:.3g}]'
-                groups_labels.append(f'{lbl}\n(n={len(group_wr)})')
-                groups_medians.append(np.median(group_wr))
-
-            if groups_data:
-                cmap = plt.cm.RdYlGn
-                med_min, med_max = min(groups_medians), max(groups_medians)
-                med_range = med_max - med_min if med_max != med_min else 1.0
-                box_colors = [cmap((m - med_min) / med_range) for m in groups_medians]
-
-                bp = ax.boxplot(
-                    groups_data,
-                    labels=groups_labels,
-                    patch_artist=True,
-                    notch=use_notch and all(len(g) >= 5 for g in groups_data),
-                    showmeans=True,
-                    meanprops=dict(marker='D', markerfacecolor='navy',
-                                   markeredgecolor='navy', markersize=6),
-                    medianprops=dict(color='black', linewidth=2),
-                    flierprops=dict(marker='o', markersize=3, alpha=0.4,
-                                    markerfacecolor='gray'),
-                )
-                for patch, color in zip(bp['boxes'], box_colors):
-                    patch.set_facecolor(color)
-                    patch.set_alpha(0.75)
-
-                # Jitter overlay
-                if show_points:
-                    rng = np.random.default_rng(seed=42)
-                    for i, group_wr in enumerate(groups_data, start=1):
-                        jitter = rng.uniform(-0.18, 0.18, size=len(group_wr))
-                        ax.scatter(
-                            np.full(len(group_wr), i) + jitter,
-                            group_wr,
-                            alpha=0.35, s=14, color='steelblue', zorder=3
-                        )
-
-        ax.set_title(
-            f'{hyperparam_labels[param]} vs Win Rate\n'
-            f'({n_trials_total} trials · {n_bins} bins por percentil)',
-            fontsize=13, fontweight='bold'
-        )
-        ax.set_xlabel(hyperparam_labels[param], fontsize=11)
-        ax.set_ylabel('Win Rate (%)', fontsize=11)
-        ax.tick_params(axis='x', labelsize=9)
-        ax.grid(True, alpha=0.3, axis='y')
-
-        legend_elements = [
-            Line2D([0], [0], marker='D', color='w', markerfacecolor='navy',
-                   markersize=7, label='Media'),
-            Line2D([0], [0], color='black', linewidth=2, label='Mediana'),
-        ]
-        ax.legend(handles=legend_elements, fontsize=9, loc='upper right')
-
-        plt.tight_layout()
-        plot_path_bp = os.path.join(save_dir, f"smac_boxplot_{param}.png")
-        plt.savefig(plot_path_bp, dpi=300, bbox_inches='tight')
-        print(f"Gráfica guardada: {plot_path_bp}")
-        plt.close()
-        plot_paths_boxplots.append(plot_path_bp)
-
-    print(f"\nTodas las gráficas guardadas en: {save_dir}/")
-    print(f"  - {os.path.basename(plot_path_1)}")
-    print(f"  - {os.path.basename(plot_path_2)}")
-    print(f"  - {os.path.basename(plot_path_3)}")
-    if objective.results_history:
-        print(f"  - {os.path.basename(plot_path_4)}")
-    print(f"  - 6 gráficos de hiperparámetros individuales vs win_rate (scatter)")
-    print(f"  - {os.path.basename(plot_path_corr)}")
-    if len(top_trials) > 1:
-        print(f"  - {os.path.basename(plot_path_evolution)}")
-    for pp in plot_paths_boxplots:
-        print(f"  - {os.path.basename(pp)}")
-    
-    # Tabla resumen (consola)
-    print(f"\n{'='*70}")
-    print("RESUMEN DE TODOS LOS TRIALS (SMAC)")
-    print(f"{'='*70}")
-    print(f"{'Trial':>6} | {'Win Rate':>10} | {'Costo':>8} | {'Pop':>4} | {'Gens':>4} | {'SBX_P':>7} | {'SBX_eta':>8} | {'PM_pv':>7} | {'PM_eta':>8}")
-    print("-" * 95)
-    for r in sorted(objective.results_history, key=lambda x: x['win_rate'], reverse=True):
-        c = r['config']
-        print(f"{r['trial']:>6} | {r['win_rate']:>9.2f}% | {r['cost']:>8.4f} | "
-              f"{c.get('population_size', '?'):>4} | {c.get('n_generations', '?'):>4} | "
-              f"{c.get('sbx_prob', 0):>7.4f} | {c.get('sbx_eta', 0):>8.2f} | "
-              f"{c.get('pm_prob_var', 0):>7.4f} | {c.get('pm_eta', 0):>8.2f}")
-    print(f"{'='*70}\n")
-
-    # ================================================================
-    # README con rango de hiperparámetros y tabla resumen
-    # ================================================================
-    readme_path = os.path.join(save_dir, "README.md")
-    try:
-        # Obtener rangos desde el configspace
-        cs = objective.configspace
-        hp_ranges = {}
-        for hp in cs.get_hyperparameters():
-            if hasattr(hp, 'lower') and hasattr(hp, 'upper'):
-                hp_ranges[hp.name] = (hp.lower, hp.upper, type(hp).__name__)
-            else:
-                hp_ranges[hp.name] = (None, None, type(hp).__name__)
-
-        hyperparam_labels = {
-            'population_size': 'Population Size',
-            'n_generations':   'Number of Generations',
-            'sbx_prob':        'SBX Probability',
-            'sbx_eta':         'SBX Eta',
-            'pm_prob_var':     'PM Prob Var',
-            'pm_eta':          'PM Eta',
-        }
-
-        lines = []
-        lines.append("# SMAC3 – Resultados de Optimización de Hiperparámetros\n")
-        lines.append(f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  \n")
-        lines.append(f"Trials ejecutados: {len(objective.results_history)}  \n")
-        if objective.results_history:
-            best = max(objective.results_history, key=lambda x: x['win_rate'])
-            lines.append(f"Mejor win rate: **{best['win_rate']:.2f}%** (trial {best['trial']})  \n")
-        lines.append("\n---\n")
-
-        # Sección: rango de hiperparámetros
-        lines.append("## Espacio de búsqueda (rango de hiperparámetros)\n\n")
-        lines.append("| Hiperparámetro | Etiqueta | Tipo | Mínimo | Máximo |\n")
-        lines.append("|---|---|---|---|---|\n")
-        for name, (lo, hi, htype) in hp_ranges.items():
-            label = hyperparam_labels.get(name, name)
-            tipo = "Entero" if "Integer" in htype else "Float"
-            lo_str = str(lo) if lo is not None else "—"
-            hi_str = str(hi) if hi is not None else "—"
-            lines.append(f"| `{name}` | {label} | {tipo} | {lo_str} | {hi_str} |\n")
-        lines.append("\n**Valores fijos (no optimizados):**\n")
-        lines.append("- `sbx_prob_var` = 1.0\n")
-        lines.append("- `pm_prob` = 1.0\n")
-        lines.append("- `test_episodes` = 25\n")
-        lines.append("- `reward_range` = (−1, 1)\n")
-        lines.append("\n---\n")
-
-        # Sección: tabla resumen de trials
-        lines.append("## Tabla de resultados (ordenada por Win Rate)\n\n")
-        lines.append("| Trial | Win Rate | Costo | Pop | Gens | SBX_P | SBX_eta | PM_pv | PM_eta |\n")
-        lines.append("|------:|----------:|------:|----:|----:|------:|--------:|------:|-------:|\n")
-        for r in sorted(objective.results_history, key=lambda x: x['win_rate'], reverse=True):
+        # ================================================================
+        # Tabla resumen (consola)
+        # ================================================================
+        print(f"\n  {'='*90}")
+        print(f"  RESUMEN TRIALS — {label.upper()}")
+        print(f"  {'='*90}")
+        print(f"  {'Trial':>6} | {'Win Rate':>10} | {'Costo':>8} | "
+              f"{'Term. Reason':<18} | {'Pop':>4} | {'Gens':>4} | "
+              f"{'SBX_P':>7} | {'SBX_eta':>8} | {'PM_pv':>7} | {'PM_eta':>8}")
+        print(f"  {'-'*105}")
+        for r in sorted(records, key=lambda x: x['win_rate'], reverse=True):
             c = r['config']
-            lines.append(
-                f"| {r['trial']} | {r['win_rate']:.2f}% | {r['cost']:.4f} | "
-                f"{c.get('population_size', '?')} | {c.get('n_generations', '?')} | "
-                f"{c.get('sbx_prob', 0):.4f} | {c.get('sbx_eta', 0):.2f} | "
-                f"{c.get('pm_prob_var', 0):.4f} | {c.get('pm_eta', 0):.2f} |\n"
-            )
-        lines.append("\n---\n")
+            tr = r.get('termination_reason', '?')
+            print(f"  {r['trial']:>6} | {r['win_rate']:>9.2f}% | {r['cost']:>8.4f} | "
+                  f"{tr:<18} | {c.get('population_size', '?'):>4} | "
+                  f"{c.get('n_generations', '?'):>4} | "
+                  f"{c.get('sbx_prob', 0):>7.4f} | {c.get('sbx_eta', 0):>8.2f} | "
+                  f"{c.get('pm_prob_var', 0):>7.4f} | {c.get('pm_eta', 0):>8.2f}")
+        print(f"  {'='*90}\n")
 
-        # Sección: gráficas generadas
-        lines.append("## Gráficas generadas\n\n")
-        plot_files = [f for f in os.listdir(save_dir) if f.endswith(".png")]
-        for pf in sorted(plot_files):
-            lines.append(f"![{pf}]({pf})\n\n")
+        # ================================================================
+        # README
+        # ================================================================
+        readme_path = os.path.join(sub_dir, "README.md")
+        try:
+            cs = objective.configspace
+            hp_ranges = {}
+            for hp in cs.get_hyperparameters():
+                if hasattr(hp, 'lower') and hasattr(hp, 'upper'):
+                    hp_ranges[hp.name] = (hp.lower, hp.upper, type(hp).__name__)
+                else:
+                    hp_ranges[hp.name] = (None, None, type(hp).__name__)
 
-        with open(readme_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-        print(f"README guardado en: {readme_path}")
-    except Exception as e:
-        print(f"Advertencia: no se pudo generar el README: {e}")
+            lines = []
+            lines.append(f"# SMAC3 – Resultados de Optimización de Hiperparámetros — {label}\n")
+            lines.append(f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  \n")
+            lines.append(f"Trials en este subconjunto: {n}  \n")
+            if records:
+                best = max(records, key=lambda x: x['win_rate'])
+                lines.append(f"Mejor win rate: **{best['win_rate']:.2f}%** (trial {best['trial']})  \n")
+            lines.append("\n---\n")
+            lines.append("## Espacio de búsqueda (rango de hiperparámetros)\n\n")
+            lines.append("| Hiperparámetro | Etiqueta | Tipo | Mínimo | Máximo |\n")
+            lines.append("|---|---|---|---|---|\n")
+            for name, (lo, hi_r, htype) in hp_ranges.items():
+                lbl2  = hyperparam_labels.get(name, name)
+                tipo  = "Entero" if "Integer" in htype else "Float"
+                lo_s  = str(lo)   if lo   is not None else "—"
+                hi_s  = str(hi_r) if hi_r is not None else "—"
+                lines.append(f"| `{name}` | {lbl2} | {tipo} | {lo_s} | {hi_s} |\n")
+            lines.append("\n**Valores fijos (no optimizados):**\n")
+            lines.append("- `sbx_prob_var` = 1.0\n- `pm_prob` = 1.0\n")
+            lines.append("- `test_episodes` = 25\n- `reward_range` = (−1, 1)\n")
+            lines.append("\n---\n")
+            lines.append("## Tabla de resultados (ordenada por Win Rate)\n\n")
+            lines.append("| Trial | Win Rate | Costo | Term. Reason | Pop | Gens | "
+                         "SBX_P | SBX_eta | PM_pv | PM_eta |\n")
+            lines.append("|------:|----------:|------:|:-------------|----:|----:|"
+                         "------:|--------:|------:|-------:|\n")
+            for r in sorted(records, key=lambda x: x['win_rate'], reverse=True):
+                c = r['config']
+                tr = r.get('termination_reason', '?')
+                lines.append(
+                    f"| {r['trial']} | {r['win_rate']:.2f}% | {r['cost']:.4f} | {tr} | "
+                    f"{c.get('population_size', '?')} | {c.get('n_generations', '?')} | "
+                    f"{c.get('sbx_prob', 0):.4f} | {c.get('sbx_eta', 0):.2f} | "
+                    f"{c.get('pm_prob_var', 0):.4f} | {c.get('pm_eta', 0):.2f} |\n"
+                )
+            lines.append("\n---\n")
+            lines.append("## Gráficas generadas\n\n")
+            for pf in sorted(f for f in os.listdir(sub_dir) if f.endswith(".png")):
+                lines.append(f"![{pf}]({pf})\n\n")
+            with open(readme_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            print(f"  README guardado en: {readme_path}")
+        except Exception as _e:
+            print(f"  Advertencia: no se pudo generar el README: {_e}")
+
+    # ----------------------------------------------------------------
+    # Ejecutar para cada subconjunto
+    # ----------------------------------------------------------------
+    for records, sub_dir, label in subsets:
+        _plot_subset(records, sub_dir, label)
+
+    print(f"\nTodos los plots guardados en subdirectorios de: {save_dir}/")
+    print(f"  combined/   — {len(combined_records)} trials (success + ga_timeout)")
+    print(f"  success/    — {len(success_records)} trials")
+    print(f"  ga_timeout/ — {len(ga_timeout_records)} trials")
+    skipped = len(objective.results_history) - len(combined_records)
+    if skipped:
+        print(f"  ({skipped} trial(s) omitidos por termination_reason != success/ga_timeout)")
+
+
 
 
 def main():
