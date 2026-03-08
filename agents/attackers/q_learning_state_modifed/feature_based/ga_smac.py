@@ -6,6 +6,7 @@ from pymoo.operators.mutation.pm import PM
 from pymoo.operators.sampling.rnd import FloatRandomSampling
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
+from pymoo.core.callback import Callback
 from AIDojoCoordinator.game_components import Action, ActionType
 import pickle
 import matplotlib.pyplot as plt
@@ -26,6 +27,23 @@ from smac import HyperparameterOptimizationFacade, Scenario
 from smac.runhistory import RunHistory
 import logging
 from datetime import datetime
+
+
+class _BestFitnessCallback(Callback):
+    """Lightweight callback that records the best fitness each generation.
+
+    This replaces ``save_history=True`` in pymoo's ``minimize()`` to avoid
+    storing the full population arrays for every generation, which can
+    easily exhaust memory on large Q-tables.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.history = []
+
+    def notify(self, algorithm):
+        best_f = algorithm.opt.get("F")[0]
+        self.history.append(float(best_f) if hasattr(best_f, 'item') else float(best_f))
 
 
 class QTableOptimizationProblem(Problem):
@@ -724,6 +742,7 @@ class QTableGeneticOptimizer:
         
         # Ejecutar optimización
         print("Iniciando evolución...\n")
+        callback = _BestFitnessCallback()
         self.problem.start_servers()
         try:
             res = minimize(
@@ -731,7 +750,8 @@ class QTableGeneticOptimizer:
                 algorithm,
                 termination,
                 verbose=verbose,
-                save_history=True
+                save_history=False,
+                callback=callback,
             )
         finally:
             self.problem.stop_servers()
@@ -740,8 +760,8 @@ class QTableGeneticOptimizer:
         self.best_params = res.X
         self.best_q_table = self.problem._create_q_table_from_params(res.X)
         
-        # Guardar historial de optimización
-        self.optimization_history = [entry.opt.get("F")[0] for entry in res.history]
+        # Guardar historial de optimización (from lightweight callback)
+        self.optimization_history = callback.history
         
         print("\n" + "="*70)
         print("OPTIMIZACIÓN COMPLETADA")
