@@ -43,7 +43,7 @@ class _BestFitnessCallback(Callback):
 
     def notify(self, algorithm):
         best_f = algorithm.opt.get("F")[0]
-        self.history.append(float(best_f) if hasattr(best_f, 'item') else float(best_f))
+        self.history.append(float(np.asarray(best_f).flat[0]))
 
 
 class QTableOptimizationProblem(Problem):
