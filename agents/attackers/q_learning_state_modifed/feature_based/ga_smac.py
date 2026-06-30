@@ -166,11 +166,10 @@ class QTableOptimizationProblem(Problem):
     def _load_actions(self):
         """Carga las acciones desde registration_info.json y las convierte a objetos Action"""
         try:
-            json_raw = open("registration_info.json").read()
+            json_raw = open(self.actions_file).read()
 
             outer = json.loads(json_raw)          # convierte primer nivel
             actions_dicts = json.loads(outer["all_actions"])  # convierte el string interno
-
 
             print("Cantidad de acciones:", len(actions_dicts))
             print("Ejemplo:", actions_dicts[0])
@@ -185,14 +184,7 @@ class QTableOptimizationProblem(Problem):
             actions = []
             for action_dict in actions_dicts:
                 if 'action_type' in action_dict and 'parameters' in action_dict:
-                    # Convertir action_type string a ActionType enum
-                    # Limpiar el prefijo 'ActionType.' si existe
-                    action_type_str = action_dict['action_type'].replace('ActionType.', '')
-                    action_type = ActionType[action_type_str]
-                    
-                    # Convertir parámetros a estructura hashable
-                    params = self._make_params_hashable(action_dict['parameters'])
-                    action = Action(action_type, parameters=params)
+                    action = Action.from_dict(action_dict)
                     actions.append(action)
             
             print(f"Convertidas {len(actions)} acciones a objetos Action")
