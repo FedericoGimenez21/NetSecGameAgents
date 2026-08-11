@@ -21,6 +21,7 @@ import socket as _socket
 import queue as stdlib_queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
+import csv
 from pathlib import Path
 from ConfigSpace import ConfigurationSpace, Configuration, Float, Integer
 from smac import HyperparameterOptimizationFacade, Scenario
@@ -40,10 +41,16 @@ class _BestFitnessCallback(Callback):
     def __init__(self):
         super().__init__()
         self.history = []
+        self.generation_history = []
 
     def notify(self, algorithm):
         best_f = algorithm.opt.get("F")[0]
-        self.history.append(float(np.asarray(best_f).flat[0]))
+        best_f = float(np.asarray(best_f).flat[0])
+        generation = getattr(algorithm, "n_gen", None)
+        if generation is None:
+            generation = len(self.history) + 1
+        self.history.append(best_f)
+        self.generation_history.append((int(generation), best_f))
 
 
 class QTableOptimizationProblem(Problem):
@@ -651,6 +658,7 @@ class QTableGeneticOptimizer:
         
         self.best_q_table = None
         self.optimization_history = []
+        self.generation_history = []
         self.best_params = None
     
     def optimize(self, 
@@ -661,7 +669,8 @@ class QTableGeneticOptimizer:
                  pm_prob_var=0.1,
                  pm_eta=20,
                  ga_timeout=None,
-                 verbose=True):
+                 verbose=True,
+                 history_tsv_path=None):
         """
         Ejecuta la optimización usando algoritmo genético.
         
@@ -754,6 +763,8 @@ class QTableGeneticOptimizer:
         
         # Guardar historial de optimización (from lightweight callback)
         self.optimization_history = callback.history
+        self.generation_history = callback.generation_history
+        self.save_generation_history_tsv(history_tsv_path)
         
         print("\n" + "="*70)
         print("OPTIMIZACIÓN COMPLETADA")
@@ -763,6 +774,27 @@ class QTableGeneticOptimizer:
         print("="*70 + "\n")
         
         return self.best_q_table
+
+    def save_generation_history_tsv(self, filename=None):
+        """Guarda el mejor winrate por generación en un archivo TSV."""
+        if filename is None:
+            filename = "generation_history.tsv"
+
+        if not self.generation_history:
+            print("No hay historial de generaciones para guardar.")
+            return
+
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with output_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, delimiter="\t")
+            writer.writerow(["generation", "best_fitness", "best_win_rate"])
+            for generation, fitness in self.generation_history:
+                best_win_rate = -fitness
+                writer.writerow([generation, fitness, best_win_rate])
+
+        print(f"Historial de generaciones guardado en: {output_path}")
     
     def save_q_table(self, filename="optimized_q_table_ga.pickle"):
         """
@@ -1069,6 +1101,7 @@ class SMACGAObjective:
             )
             
             # Ejecutar optimización GA (con límites de tiempo si están configurados)
+            history_tsv_path = os.path.join(os.getcwd(), f"ga_generation_history_trial_{trial_num}.tsv")
             optimize_kwargs = dict(
                 population_size=population_size,
                 n_generations=n_generations,
@@ -1078,6 +1111,7 @@ class SMACGAObjective:
                 pm_eta=pm_eta,
                 ga_timeout=self.ga_timeout,
                 verbose=True,
+                history_tsv_path=history_tsv_path,
             )
             optimized_q_table = optimizer.optimize(**optimize_kwargs)
             
@@ -1882,6 +1916,10 @@ Ejemplo de uso:
                        help="Ruta donde guardar la gráfica de progreso (opcional)",
                        default=None,
                        type=str)
+    parser.add_argument("--history_tsv",
+                       help="Ruta del archivo TSV donde guardar el mejor winrate por generación",
+                       default=None,
+                       type=str)
     # Argumentos SMAC
     parser.add_argument("--smac",
                        help="Activar optimización de hiperparámetros con SMAC3",
@@ -2027,7 +2065,8 @@ Ejemplo de uso:
                 pm_prob_var=best_params['pm_prob_var'],
                 pm_eta=best_params['pm_eta'],
                 ga_timeout=args.ga_timeout,
-                verbose=True
+                verbose=True,
+                history_tsv_path=args.history_tsv or os.path.join(args.smac_output_dir, 'final_generation_history.tsv')
             )
             
             # Guardar modelo final
@@ -2079,7 +2118,8 @@ Ejemplo de uso:
             pm_prob_var=args.pm_prob_var,
             pm_eta=args.pm_eta,
             ga_timeout=args.ga_timeout,
-            verbose=True
+            verbose=True,
+            history_tsv_path=args.history_tsv
         )
         
         # Guardar la Q-table optimizada
